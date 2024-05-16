@@ -1,4 +1,4 @@
-# Project 2 Id Server
+# Identity Server
 
 * Author: Alex Lewtschuk and Kai Sorrenson
 * Class: CS455 [Distributed Systems] 
@@ -6,6 +6,8 @@
 ## Overview
 
 This project consists of two main programs: IdServer and IdClient. IdServer sets up an RMI instance and initializes a registry so that IdClient can use remote method calls to perform actions on the server. This is essentially a modified simple implementation of the Kerberos protocol.
+
+There are two branches in this repo. Each branch has different features. This branch is the original implementation. The second is modifed for the servers to elect a coordinator using a bully algorithm. The coordinator is the only server that intracts with the client connections. The system is also desined for the database be replicated to backup servers providing replication transparency. 
 
 ## Manifest
 
