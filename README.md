@@ -1,6 +1,6 @@
 # Project 2 Id Server
 
-* Author: Kai Sorensen and Alex Lewtschuk
+* Author: Alex Lewtschuk and Kai Sorrenson
 * Class: CS455 [Distributed Systems] 
 
 ## Overview
