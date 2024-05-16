@@ -8,9 +8,8 @@ else \
 fi
 redis-cli flushall
 
-# next, kill redis server
+# kill redis server
 pid=$(pgrep redis-server)
-# Check if any PIDs were found
 if [ -z "$pid" ]; then
     echo "No Redis server to stop."
 else

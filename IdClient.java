@@ -1,32 +1,129 @@
+import java.io.File;
+import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.rmi.*;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.Arrays;
-
+import java.util.List;
+import java.util.Scanner;
+import java.util.Timer;
+import java.util.TimerTask;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.regex.Pattern;
 
 import org.apache.commons.cli.*;
 
 public class IdClient {
-    static String host = "localhost";
+    static String host = null;
     static int port = 5128;
+    static String coordAddy = "none";
+    static Registry reg;
     static ServerInterface severus;
+    static boolean debug = false;
+    final static String IP_PATTERN = "^(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)\\." +
+                                     "(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)\\." +
+                                     "(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)\\." +
+                                     "(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)$";
+
+    final static String RESET = "\u001B[0m";
+    final static String ANSI_BLACK = "\u001B[30m";
+    final static String ERRORC = "\u001B[31m";
+    final static String INFOC = "\u001B[32m";
+    final static String DEBUGC = "\u001B[33m";
+    final static String ANSI_PURPLE = "\u001B[35m";
+    final static String ACCOUNTC = "\u001B[36m";
+    final static String ANSI_WHITE = "\u001B[37m";
+    final static String DEBUGFLAG = "[" + DEBUGC + "DEBUG" + RESET + "] ";
+    final static String ERRORFLAG = "[" + ERRORC + "ERROR" + RESET + "] ";
+    final static String INFOFLAG = "[" + INFOC + "INFO" + RESET + "]";
+
+    static List<String> serverHostList = new ArrayList<>(); //List to hold serverHost addresses
 
     public static void main(String[] args) throws UnknownHostException{
 
-        final String RESET = "\u001B[0m";
-        final String ANSI_BLACK = "\u001B[30m";
-        final String ERRORC = "\u001B[31m";
-        final String ANSI_GREEN = "\u001B[32m";
-        final String ANSI_YELLOW = "\u001B[33m";
-        final String ANSI_PURPLE = "\u001B[35m";
-        final String ACCOUNTC = "\u001B[36m";
-        final String ANSI_WHITE = "\u001B[37m";
+        try {    
 
+        CommandLine command = settupOptions(args);
+        debug = command.hasOption("dx");
+        if(debug){System.out.println(DEBUGFLAG + "Setting debug to " + debug);}
+
+
+        setupSSL();
+            
+            
+        String whichArg = getArg(command).toLowerCase();
+
+        initServerConnection(command);
+
+            
+            
+
+            //Required arg
+            if (command.hasOption("server")) {
+                System.out.println("== CLIENT RUNNING ==");
+                System.out.println("Connecting to IdSever at host: " + host + " Port: " + port + "\n");
+            } 
+
+            //Get system IP
+            InetAddress localHost = InetAddress.getLocalHost();
+            String ipAddress = localHost.getHostAddress();
+
+            performAction(command, whichArg, ipAddress);
+            
+        }
         
+        catch (MissingOptionException e){
+            System.err.println(ERRORC + "[ERROR]: " + RESET + "Client missing needed options.");
+            System.err.println(INFOC +"USAGE: " + RESET + "IdClient <-s serverhost> [other commands]");
+            System.exit(1);
+        } catch (MissingArgumentException e){
+            System.err.println(ERRORC + "[ERROR]: " + RESET + "-s missing needed argument.");
+            System.err.println(INFOC +"USAGE: " + RESET + "IdClient <-s serverhost> [other commands]");
+            System.exit(1);
+        } catch (ParseException e) {
+            if(debug){e.printStackTrace();}
+            System.err.println(ERRORC + "[ERROR]: " + RESET + "Client ran into" + ERRORC + " PARSING" + RESET + " error in main");
+        } catch (java.net.UnknownHostException e) {
+            if(debug){e.printStackTrace();}
+            System.err.println(ERRORC + "[ERROR]: " + RESET + "Client ran into" + ERRORC + " UNKNOWN-HOST" + RESET + " error in main");
+        }catch (Exception e) {
+            if(debug){e.printStackTrace();}
+            if(debug){System.err.println(ERRORC + "[ERROR]: " + RESET + "Client ran into" + ERRORC + " EXCEPTION" + RESET + " error in main");}
+            if(debug){System.err.println(ERRORC + "[ERROR]: " + RESET + "The problem lies in initServerConnection()");}
+        }
+        //catch ( Exception e ) {
+        //     if(debug){e.printStackTrace();}
+        //     System.err.println(ERRORC + "[ERROR]: " + RESET + "Client ran into" + ERRORC + " LAST RESORT CATCH " + RESET + " error in main");
+        // }
 
+ 
+    } //end main
+
+    /**
+     * Sets up the SSL system properties
+     */
+    private static void setupSSL() {
+        System.setProperty("javax.net.ssl.trustStore", "Client_Truststore");
+        System.setProperty("java.security.policy", "mysecurity.policy");
+        System.setProperty("javax.net.ssl.trustStorePassword", "123456");
+    }
+
+    /**
+     * Adds the cli options and setus up the cliParser
+     * @param args
+     * @return
+     * @throws ParseException
+     */
+    public static CommandLine settupOptions(String[] args) throws ParseException{
         //Use Apache Cli to create cli options
         Options options = new Options();
         options.addRequiredOption("s", "server", true, "RMI Server hostname");
@@ -38,37 +135,155 @@ public class IdClient {
         options.addOption(new Option("d", "delete", true, "Requests the loginname deletion"));
         options.addOption(new Option("g", "get", true, "Obtains a list of all loginnames, all UUIDs or a list of user, UUID, and string descriptions of all accounts"));
         options.addOption(new Option("p", "password", true, "Optional argument for a password value"));
+        options.addOption(new Option("dx", "debug", false, "Sets client debug on/off")); //Client debug option
 
         //Command Line Parser
         CommandLineParser cliParser = new DefaultParser();
+        return cliParser.parse(options, args);
+    }
+
+    /**
+     * Initializes the server connection 
+     * @param command
+     * @throws Exception
+     */
+    public static void initServerConnection(CommandLine command) throws Exception {
+        String serverCommandArgument = command.getOptionValue("server");
+    
+        //If the server input contains a . and is a serverfile process the file
+        if (serverCommandArgument.contains(".") && serverCommandArgument.endsWith("server")) {
+            processServerFile(serverCommandArgument);
+        } else if (serverCommandArgument.contains(".") && !serverCommandArgument.endsWith("server")) { //If the server input contains a . and is not a serverfile exit and inform user
+            System.out.println(ERRORFLAG + "File type not recognized. Please use a \".server\" file");
+            System.exit(1);
+        } else { //No input file specified so the server input functions as in P2
+            if (debug) {System.out.println(DEBUGFLAG + "No file input, setting host to " + serverCommandArgument);}
+            if(severus == null){
+                host = serverCommandArgument; // Set the host directly if it's not a file
+                reg = LocateRegistry.getRegistry(host, port);
+                severus = (ServerInterface) reg.lookup("severus");
+            }
+            if (debug && severus != null) {System.out.println(DEBUGFLAG + "Serverus has been set");}
+        }
+    }
+    
+    
+    /**
+     * Parses the file to pull IP addresses into a List<String>
+     * @param serverFilePath
+     */
+    public static void processServerFile(String serverFilePath) {
+        File inputFile = new File(serverFilePath);
+        try (Scanner scanner = new Scanner(inputFile)) {
+            scanner.useDelimiter(",");
+            while (scanner.hasNext()) {
+                String next = scanner.next();
+                if (Pattern.matches(IP_PATTERN, next.trim())) {
+                    serverHostList.add(next);
+                }
+            }
+    
+            if (serverHostList.isEmpty()) {
+                System.out.println(ERRORFLAG + "No valid server addresses found in file.");
+                System.exit(1);
+            }
+            if (debug){System.out.println(DEBUGFLAG + "Addresses in serverHostList: " + serverHostList);}
+            connectToServer(); // Attempt to connect to servers from the list
+
+        } catch (Exception e) {
+            System.out.println(ERRORFLAG + "Problem reading server file: " + e.getMessage());
+            System.exit(1);
+        }
+    }
+    
+
+    /**
+     * Attempts server connection with retry mechanism
+     */
+    public static void connectToServer() {
+        boolean isConnected = false;
+        int attempts = 0;
+        String serverHost;
+        for(int i = 0; i < serverHostList.size(); i++) {
+            
+            try {
+                if(!coordAddy.equals("none")) serverHost = coordAddy;
+                else serverHost = serverHostList.get(i);
+
+                if (debug) System.out.println(DEBUGFLAG + "trying this host: " + serverHost);
+                host = serverHost.trim();
+
+                reg = LocateRegistry.getRegistry(host, port);
+                severus = (ServerInterface) reg.lookup("severus");
+                String[] boundNames = reg.list();
+                if(debug){System.out.println(DEBUGFLAG + "Bound names: " + String.join(", ", boundNames));}
+                isConnected = true;
+                System.out.println(DEBUGFLAG + "Connected to " + host);
 
 
+                int state = severus.getState();
+                System.out.println(DEBUGFLAG + "State: " + state);
+
+                switch (state) {
+                    case 0:
+                        System.out.println(ERRORFLAG + "ELECTION IN PROGRESS: TRYING AGAIN LATER." + host);
+                        System.exit(0);
+                    case 1:
+                        Inet4Address temp = severus.getCoordinator();
+                        if (temp == null) {
+                            System.out.println(ERRORFLAG + "ELECTION IN PROGRESS: TRYING AGAIN LATER." + host);
+                            System.exit(0);
+                        }
+
+                        coordAddy = temp.toString();
+                        if(coordAddy.startsWith("/")) coordAddy = coordAddy.substring(1);
+                        System.out.println("Found Coordinator: " + coordAddy);
+                        i = serverHostList.size() - 2;
+                        break;
+                    case 2:
+                        i = serverHostList.size() - 1;
+                }
+
+
+            } catch (RemoteException | NotBoundException e) {
+                System.out.println(ERRORFLAG + "Failed to connect to " + host + ". Attempt " + (attempts + 1));
+                if (++attempts == serverHostList.size()) {
+                    System.out.println(ERRORFLAG + "All server attempts failed.");
+                    break;
+                }
+                try {
+                    // Exponential backoff
+                    Thread.sleep(1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    System.out.println(ERRORFLAG + "Thread interrupted during backoff.");
+                    break;
+                }
+            }
+        }
+
+        if (!isConnected) {
+            System.out.println(ERRORFLAG + "No available server found.");
+            System.exit(1);
+        }
+    }
+
+
+    
+    
+
+    /**
+     * Performs the requested action by connecting to the server with RMI
+     * @param command the command to be sent to the server
+     * @param whichArg
+     * @param ipAddress
+     * @throws RemoteException
+     */
+    public static void performAction(CommandLine command, String whichArg, String ipAddress){
         try {
-            System.setProperty("javax.net.ssl.trustStore", "Client_Truststore");
-            System.setProperty("java.security.policy", "mysecurity.policy");
-            System.setProperty("javax.net.ssl.trustStorePassword", "123456");
-            //Parse commands first
-            CommandLine command = cliParser.parse(options, args);
-            String whichArg = getArg(command).toLowerCase();
-
-            //Setup registry
-            Registry reg = LocateRegistry.getRegistry(host, port);
-            severus = (ServerInterface) reg.lookup("severus");
-
-            //Get system IP
-            InetAddress localHost = InetAddress.getLocalHost();
-            String ipAddress = localHost.getHostAddress();
-
-
-            //Required arg
-            if (command.hasOption("server")) {
-                System.out.println("== CLIENT RUNNING ==");
-                System.out.println("Connecting to IdSever at host: " + command.getOptionValue("server") + " Port: " + port + "\n");
-            } 
-
             //Other required arg can be any of the following
             switch (whichArg) {
-                
+                    
                 case "create":
                     System.out.println("Command " + whichArg + " called with value: " + command.getOptionValue("create"));
                     String loginname = command.getOptionValue("create"); //Sets username to the first argument of the create option
@@ -177,24 +392,13 @@ public class IdClient {
                     System.out.println("[DEFAULT]: No arg to be parsed");
                     break;
             }
-            
-        }
-        
-        catch (ParseException e) {
-            e.printStackTrace();
-            System.err.println(ERRORC + "[ERROR]: " + RESET + "Client ran into" + ERRORC + " PARSING" + RESET + " error in main");
         } catch (RemoteException e) {
-            e.printStackTrace();
-            System.err.println(ERRORC + "[ERROR]: " + RESET + "Client ran into" + ERRORC + " REMOTE EXCEPTION" + RESET + " error in main");
-            if(port != 5128){System.err.println(ERRORC + "[ERROR_INFO]: REMOTE EXCEPTION" + RESET + " no server on port");}
-        } catch (NotBoundException e) {
-            e.printStackTrace();
-            System.err.println(ERRORC + "[ERROR]: " + RESET + "Client ran into" + ERRORC + " NOT BOUND EXCEPTION" + RESET + " error in main");
-        }catch ( Exception e ) {
-            e.printStackTrace();
-            System.err.println(ERRORC + "[ERROR]: " + RESET + "Client ran into" + ERRORC + " LAST RESORT CATCH " + RESET + " error in main");
+            if(debug){e.printStackTrace();}
+            System.err.println(ERRORC + "[ERROR]: " + RESET + "Client ran into" + ERRORC + " REMOTE-EXCEPTION" + RESET + " error in performAction()");
         }
-    } //end main
+    }
+
+
 
     /**
      * Loops through args and returns the long option. Only parses one option
@@ -208,30 +412,46 @@ public class IdClient {
             int numarg = 0;
 
             //Sets the host using the s arg
-            if(option.getOpt().equals("s")){
+            if(option.getOpt().equals("s") && !option.getValue().contains(".")){
                 arg = option.getLongOpt();
-                System.out.println("Setting host to " + command.getOptionValue(arg));
+                if(debug){System.out.println(DEBUGFLAG + "Setting host to " + command.getOptionValue(arg));}
                 host = command.getOptionValue(arg);
             }
+
+            // if((option.getOpt().equals("s") && option.getValue().contains("."))){
+            //     numarg++;
+            //     if(debug){System.out.println(DEBUGFLAG + "Server input is a file: " + command.getOptionValue(arg));}
+            // } else if(option.getOpt().equals("s")){
+            //     arg = option.getLongOpt();
+            //     if(debug){System.out.println(DEBUGFLAG + "Setting host to " + command.getOptionValue(arg));}
+            //     host = command.getOptionValue(arg);
+            // }
 
 
             //If the option is the required s do not pass to switch
             if(!option.getOpt().equals("s")){
                 arg = option.getLongOpt();
                 numarg++;
-                System.out.println("Current arg is: " + arg);
+                if(debug){System.out.println(DEBUGFLAG + "Current arg is: " + arg);}
+                if(option.getOpt().equals("dx")){
+                    numarg--;
+                }
             }
 
             //Handles the optional n arg for port number specification if not defaults to 5128
             if(option.getOpt().equals("n")){
-                System.out.println("Setting port to " + command.getOptionValue(arg));
-                port = Integer.parseInt(command.getOptionValue(arg));
-                numarg = 0;
+                try {
+                    if(debug){System.out.println(DEBUGFLAG + "Setting port to " + command.getOptionValue(arg));}
+                    port = Integer.parseInt(command.getOptionValue(arg));
+                    numarg = 0;
+                } catch (Exception e) {
+                    System.out.println(ERRORFLAG + "-n command missing port number");
+                }
             }
 
             //If the num of needed args is 1 and the second option does not equal numport or verbose break and return
             if(numarg >= 1 && (!option.getOpt().equals("n") || !option.getOpt().equals("v"))) {
-                System.out.println(numarg);
+                if(debug){System.out.println(DEBUGFLAG + "Numarg is: " + numarg);}
                 break;
             }
         }
