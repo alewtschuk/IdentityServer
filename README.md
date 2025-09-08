@@ -1,7 +1,6 @@
 # Identity Server
 
 * Author: Alex Lewtschuk and Kai Sorrenson
-* Class: CS455 [Distributed Systems] 
 
 ## Overview
 
