@@ -10,9 +10,9 @@ There are two branches in this repo. Each branch has different features. This br
 
 ## Manifest
 
-IdServer: implements an RMI server
-IdClient: implements a client that will call remote methods on the server
-IdAccount: has the utility methods and stores the information for the account objects
+- IdServer: implements an RMI server
+- IdClient: implements a client that will call remote methods on the server
+- IdAccount: has the utility methods and stores the information for the account objects
 
 ## Building the project
 
