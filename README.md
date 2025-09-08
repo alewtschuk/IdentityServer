@@ -1,7 +1,6 @@
 # Project 3 Id Server Part 3
 
 * Author: Alex Lewtschuk and  Kai Sorensen
-* Class: CS455 [Distributed Systems] 
 
 ## Overview
 
