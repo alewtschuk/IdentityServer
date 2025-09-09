@@ -1,10 +1,10 @@
-# Project 3 Id Server Part 3
+# Identity Server - coordinator branch
 
-* Author: Alex Lewtschuk and  Kai Sorensen
+* Authors: Alex Lewtschuk and  Kai Sorensen
 
 ## Overview
 
-PROJECT VIDEO: https://youtu.be/Ljfhd653CXw
+**PROJECT VIDEO DEMO**: https://youtu.be/Ljfhd653CXw
 
 This version implements the election algorithm, coordinator and replication.
 
