@@ -76,9 +76,3 @@ To run the server with the setup for Onyx use:
 ```
 
 NOTE: Our program is configured to take .server files as input. Each of those files contains a list of IP addresses that are parsed by the program and iterated through till a connection is sucessfull. As the IPs in the provided onyx.server are configured for Boise State's Onyx system if you wish to run multiple server instances it is recommended to provide your own list of IP addresses of machines running server insances.
-
-### Known Bugs
-
-Cannot be run with localhost anyore due to how server handles setup.
-
-However, the code is flexible and will work on any network with unique IP addresses, virtual or not. 
