@@ -10,11 +10,11 @@ This version implements the election algorithm, coordinator and replication.
 
 ## Manifest
 
-IdServer: implements an RMI server
-IdClient: implements a client that will call remote methods on the server
-IdAccount: has the utility methods and stores the information for the account objects
-ServerInterface: interface for the redis server
-onyx.server: server input files with ip addresses
+- IdServer: implements an RMI server
+- IdClient: implements a client that will call remote methods on the server
+- IdAccount: has the utility methods and stores the information for the account objects
+- ServerInterface: interface for the redis server
+- onyx.server: server input files with ip addresses
 
 ## Building the project
 
