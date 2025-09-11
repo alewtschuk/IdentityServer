@@ -46,7 +46,8 @@ public class IdServer implements ServerInterface {
 
     // server coordination variables
     Object lock = new Object();
-    private final int serverNum = new Random().nextInt(10000) + 3;
+    // Stable server identifier used for Bully priority (parsed from hostname)
+    private int serverNum;
     private int state;
     private int coordinator;
 
@@ -63,6 +64,8 @@ public class IdServer implements ServerInterface {
     private String myAddress;
     private String myHostName;
     private HashSet<String> connections; // for debugging
+    // Tracks whether any higher-priority peer is alive during the last heartbeat window
+    private volatile boolean higherAlive = false;
 
     private final int election = 0;
     private final int imPleb = 1;
@@ -121,6 +124,19 @@ public class IdServer implements ServerInterface {
         this.servSock = new ServerSocket(serverPort);
         this.myAddress = InetAddress.getLocalHost().getHostAddress();
         this.myHostName = InetAddress.getLocalHost().getHostName();
+        // Determine stable serverNum from hostname suffix (e.g., id-server-3 -> 3)
+        try {
+            String[] parts = this.myHostName.split("-");
+            this.serverNum = Integer.parseInt(parts[parts.length - 1]);
+        } catch (Exception e) {
+            // Fallback deterministic id based on last IP octet
+            try {
+                String[] ipParts = this.myAddress.split("\\.");
+                this.serverNum = Integer.parseInt(ipParts[ipParts.length - 1]);
+            } catch (Exception ignored) {
+                this.serverNum = 1 + new Random().nextInt(10000);
+            }
+        }
         if (verbosity)
             System.out.println(SYSTEMFLAG + "My address is " + myAddress);
         setupServerConnections();
@@ -806,26 +822,31 @@ public class IdServer implements ServerInterface {
                         setConnectionPort(read[2]);
                         // System.out.println("received fsrom " + read[1] + ": " + readState);
                         if (readState == imBoss) {
-                            // Peer claims leadership; mark self as subordinate and record coordinator
-                            state = imPleb;
-                            coordinator = conNum;
-                            coordinatorAddy = (Inet4Address) InetAddress.getByName(connectionHost);
+                            // Only accept leadership from a strictly higher-priority server
+                            if (conNum > serverNum) {
+                                state = imPleb;
+                                coordinator = conNum;
+                                coordinatorAddy = (Inet4Address) InetAddress.getByName(connectionHost);
 
-                            if (replicateData) {
-                                String redisHost = coordinatorAddy.toString().startsWith("/")
-                                        ? coordinatorAddy.toString().substring(1)
-                                        : coordinatorAddy.toString();
-                                pool.getResource().replicaof(redisHost, redisPort);
-                                if (verbosity)
-                                    System.out.println(
-                                            SYSTEMFLAG + "my redis is now a replica of " + redisHost + ":" + redisPort);
+                                if (replicateData) {
+                                    String redisHost = coordinatorAddy.toString().startsWith("/")
+                                            ? coordinatorAddy.toString().substring(1)
+                                            : coordinatorAddy.toString();
+                                    pool.getResource().replicaof(redisHost, redisPort);
+                                    if (verbosity)
+                                        System.out.println(
+                                                SYSTEMFLAG + "my redis is now a replica of " + redisHost + ":" + redisPort);
+                                }
+                                this.replicateData = false;
+                                higherAlive = true; // remember a higher node is active
+                            } else {
+                                // Lower-priority peer claims boss; ignore
                             }
-                            this.replicateData = false;
-                            // System.out.println("Right after replicaOf");
                         }
                         // part of the bully algorithm
                         else if (readState == election) {
-                            // Do not demote if I'm already the boss. Ignore lower election chatter.
+                            // If a higher-priority peer is alive, note it. Only demote if not boss.
+                            if (conNum > serverNum) higherAlive = true;
                             if (state != imBoss) {
                                 state = election;
                                 this.replicateData = true;
@@ -833,7 +854,8 @@ public class IdServer implements ServerInterface {
                                     state = imPleb;
                                     if (conNum > coordinator)
                                         coordinator = conNum;
-                                    System.out.println(SYSTEMFLAG + " I'm a pleb (" + serverNum + " < " + conNum + ")");
+                                    if (verbosity)
+                                        System.out.println(SYSTEMFLAG + " I'm a pleb (" + serverNum + " < " + conNum + ")");
                                     toServer.sentElection = 0; // Reset sentElection if becoming a pleb
                                 }
                             }
@@ -912,21 +934,27 @@ public class IdServer implements ServerInterface {
                         lock.wait();
                     }
 
-                    // part of the bully algorithm
-                    if (state == election)
-                        sentElection++; // Increment first
-                    // part of the bully algorithm
-                    if (sentElection >= 2 && state == election) { // Check if >= 2
-                        state = imBoss;
-                        coordinator = serverNum;
-                        pool.getResource().replicaofNoOne();
-                        System.out.println(SYSTEMFLAG + " I'M THE BOSS (" + serverNum + ")");
-                        System.out.println(SYSTEMFLAG + " My redis is now independenta");
-                        sentElection = 0; // Reset after becoming boss
+                    // Approximate Bully: Only self-promote if no higher-priority node is alive
+                    if (state == election) {
+                        if (higherAlive) {
+                            sentElection = 0; // higher node active; keep waiting
+                        } else {
+                            sentElection++; // progress toward leadership
+                            if (sentElection >= 2) { // after a couple heartbeats without higher node, assume leadership
+                                state = imBoss;
+                                coordinator = serverNum;
+                                pool.getResource().replicaofNoOne();
+                                System.out.println(SYSTEMFLAG + " I'M THE BOSS (" + serverNum + ")");
+                                System.out.println(SYSTEMFLAG + " My redis is now independenta");
+                                sentElection = 0; // Reset after becoming boss
+                            }
+                        }
                     }
                     int[] toSend = { state, serverNum, serverPort };
                     oos.writeObject(toSend);
                     oos.flush();
+                    // Reset observation for next heartbeat window
+                    higherAlive = false;
                 }
             } catch (IOException e) {
                 // this.running = false;

@@ -28,6 +28,15 @@ if [ "$1" == "numport" ]; then
     echo "Starting server"
     echo
     echo
+    redis-server --bind 127.0.0.1 > /dev/null 2> /dev/null &
+    # Give Redis a moment to start before pinging
+    sleep 2
+    # Wait for Redis to start
+    until redis-cli ping; do
+      echo "Waiting for Redis to start..."
+      sleep 1
+    done
+    echo "Redis started."
     java -cp .:lib/* IdServer -n $registryPort
     echo
 
@@ -56,6 +65,15 @@ elif [ "$1" == "verbose" ]; then
     echo "Starting server"
     echo
     echo
+    redis-server --bind 127.0.0.1 > /dev/null 2> /dev/null &
+    # Give Redis a moment to start before pinging
+    sleep 2
+    # Wait for Redis to start
+    until redis-cli ping; do
+      echo "Waiting for Redis to start..."
+      sleep 1
+    done
+    echo "Redis started."
     java -cp .:lib/* IdServer $registryPort -v
     echo
 
@@ -86,6 +104,15 @@ elif [ "$1" == "both" ]; then
     echo "Starting server"
     echo
     echo
+    redis-server --bind 127.0.0.1 > /dev/null 2> /dev/null &
+    # Give Redis a moment to start before pinging
+    sleep 2
+    # Wait for Redis to start
+    until redis-cli ping; do
+      echo "Waiting for Redis to start..."
+      sleep 1
+    done
+    echo "Redis started."
     java -cp .:lib/* IdServer -n $registryPort -v
     echo
 
@@ -115,6 +142,15 @@ elif [ "$1" == "onyx" ]; then
     echo "Starting server"
     echo
     echo
+    redis-server --bind 127.0.0.1 > /dev/null 2> /dev/null &
+    # Give Redis a moment to start before pinging
+    sleep 2
+    # Wait for Redis to start
+    until redis-cli ping; do
+      echo "Waiting for Redis to start..."
+      sleep 1
+    done
+    echo "Redis started."
     java -cp .:lib/* IdServer -s onyx.server -n $registryPort -v
     echo
 
@@ -144,6 +180,15 @@ elif [ "$1" == "docker" ]; then
     echo "Starting server"
     echo
     echo
+    redis-server --bind 127.0.0.1 > /dev/null 2> /dev/null &
+    # Give Redis a moment to start before pinging
+    sleep 2
+    # Wait for Redis to start
+    until redis-cli ping; do
+      echo "Waiting for Redis to start..."
+      sleep 1
+    done
+    echo "Redis started."
     java -cp .:lib/* IdServer -s docker.server -n $registryPort -v
     echo
 
@@ -174,6 +219,15 @@ else
     echo "Starting server"
     echo
     echo
+    redis-server --bind 127.0.0.1 > /dev/null 2> /dev/null &
+    # Give Redis a moment to start before pinging
+    sleep 2
+    # Wait for Redis to start
+    until redis-cli ping; do
+      echo "Waiting for Redis to start..."
+      sleep 1
+    done
+    echo "Redis started."
     java -cp .:lib/* IdServer -s onyx.server $registryPort
     echo
 fi

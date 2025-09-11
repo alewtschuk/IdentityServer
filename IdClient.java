@@ -178,7 +178,7 @@ public class IdClient {
             scanner.useDelimiter(",");
             while (scanner.hasNext()) {
                 String next = scanner.next();
-                if (Pattern.matches(IP_PATTERN, next.trim())) {
+                if (true) { //Pattern.matches(IP_PATTERN, next.trim())) {
                     serverHostList.add(next);
                 }
             }
@@ -224,6 +224,15 @@ public class IdClient {
                 int state = severus.getState();
                 System.out.println(DEBUGFLAG + "State: " + state);
 
+                // If election is in progress, wait briefly and recheck a few times
+                if (state == 0) {
+                    for (int retry = 0; retry < 10 && state == 0; retry++) {
+                        try { Thread.sleep(500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                        state = severus.getState();
+                    }
+                    System.out.println(DEBUGFLAG + "State after wait: " + state);
+                }
+
                 switch (state) {
                     case 0:
                         System.out.println(ERRORFLAG + "ELECTION IN PROGRESS: TRYING AGAIN LATER." + host);
@@ -231,8 +240,15 @@ public class IdClient {
                     case 1:
                         Inet4Address temp = severus.getCoordinator();
                         if (temp == null) {
-                            System.out.println(ERRORFLAG + "ELECTION IN PROGRESS: TRYING AGAIN LATER." + host);
-                            System.exit(0);
+                            // brief retry for coordinator resolution
+                            for (int retry = 0; retry < 10 && temp == null; retry++) {
+                                try { Thread.sleep(500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                                temp = severus.getCoordinator();
+                            }
+                            if (temp == null) {
+                                System.out.println(ERRORFLAG + "ELECTION IN PROGRESS: TRYING AGAIN LATER." + host);
+                                System.exit(0);
+                            }
                         }
 
                         coordAddy = temp.toString();

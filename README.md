@@ -1,84 +1,68 @@
-# Project 3 Id Server Part 3
+# Identity Server
 
-* Author: Alex Lewtschuk and  Kai Sorensen
+* Author: Alex Lewtschuk and Kai Sorensen
 
-## Overview
+---
 
-PROJECT VIDEO: https://youtu.be/Ljfhd653CXw
+## Running the Demo (Docker Recommended)
 
-This version implements the election algorithm, coordinator and replication.
+This project is configured to run as a multi-server cluster using Docker and Docker Compose. This is the recommended way to run the project as it encapsulates the entire environment (Java, Redis, and networking).
 
-## Manifest
+### 1. Run the Server Cluster
 
-IdServer: implements an RMI server
-IdClient: implements a client that will call remote methods on the server
-IdAccount: has the utility methods and stores the information for the account objects
-ServerInterface: interface for the redis server
-onyx.server: server input files with ip addresses
+**Prerequisites:**
+* Docker
+* Docker Compose
 
-## Building the project
+Launch the 3-node server cluster and the Redis database with a single command:
 
-A makefile is included in the directory. It will compile the necessary files, preparing them for execution.
-There are several ways to use our makefile.
-
-Execute the makefile from the project directory as follows:
-
-To compile all files use:
-```
-make
+```bash
+docker-compose up --build
 ```
 
-NOTE: THE FOLLOWING METHOD WILL KILL THE SERVER IF RUNNING!!!
+This will start three `IdServer` instances. The servers will communicate with each other, elect a coordinator, and handle client requests.
 
-To clean and reset the project(including the redis database) from the project directory, use:
+To see the log output of a specific server and observe the election process or heartbeats, you can run (in a separate terminal):
 
-```
-make clean
-```
-
-To clear the redis database use:
-
-```
-make resetdb
+```bash
+docker-compose logs -f id-server-1
+# Or id-server-2, id-server-3
 ```
 
-## Features and usage
+### 2. Run the Client
 
-To use the program follow the following steps:
+To run the client, use the `docker-compose run` command in a new terminal. This will start a new container on the same network as the servers, allowing it to connect.
 
-Start by launching the server. You can use the sh script that we designed. There are several ways to run the script.
+Here are some example commands:
 
-First please ensure you allow the script execute permissions by running `chmod +x run-server.sh`.
+*   **Create an account:**
 
-To run the server in default mode (no optional commands used) use:
-```
-./run-server.sh
-```
+    ```bash
+    docker-compose run client java -cp .:lib/* IdClient -s docker.server -c myuser -p mypassword "My Real Name"
+    ```
 
-To run the server and specify the port number use:
-```
-./run-server.sh numport
-```
+*   **Look up a user:**
 
-To run the server with detailed verbose output use:
-```
-./run-server.sh verbose
-```
+    ```bash
+    docker-compose run client java -cp .:lib/* IdClient -s docker.server -l myuser
+    ```
 
-To run the server with both optional commands enabled use:
-```
-./run-server.sh both
-```
+*   **Get a list of all users:**
 
-To run the server with the setup for Onyx use:
-```
-./run-server.sh onyx 5128
-```
+    ```bash
+    docker-compose run client java -cp .:lib/* IdClient -s docker.server -g users
+    ```
 
-NOTE: Our program is configured to take .server files as input. Each of those files contains a list of IP addresses that are parsed by the program and iterated through till a connection is sucessfull. As the IPs in the provided onyx.server are configured for Boise State's Onyx system if you wish to run multiple server instances it is recommended to provide your own list of IP addresses of machines running server insances.
+*   **Delete an account:**
 
-### Known Bugs
+    ```bash
+    docker-compose run client java -cp .:lib/* IdClient -s docker.server -d myuser -p mypassword
+    ```
 
-Cannot be run with localhost anyore due to how server handles setup.
+---
 
-However, the code is flexible and will work on any network with unique IP addresses, virtual or not. 
+## Project Overview
+
+This project consists of two main programs: `IdServer` and `IdClient`. `IdServer` sets up an RMI instance and initializes a registry so that `IdClient` can use remote method calls to perform actions on the server. This is essentially a modified simple implementation of the Kerberos protocol.
+
+This version implements a multi-server environment where servers elect a coordinator using a bully algorithm. The coordinator is the only server that interacts with the client connections. The system is also designed for the database to be replicated to backup servers, providing replication transparency.

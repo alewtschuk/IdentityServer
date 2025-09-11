@@ -1,0 +1,58 @@
+services:
+  redis:
+    image: "redis:alpine"
+    networks:
+      - id-net
+
+  id-server-1:
+    build: .
+    hostname: id-server-1
+    depends_on:
+      - redis
+    command: ["./run-server.sh", "docker", "5128"]
+    networks:
+      - id-net
+    ports:
+      - "5128:5128"
+      - "6379:6379" # Expose Redis port
+
+  id-server-2:
+    build: .
+    hostname: id-server-2
+    depends_on: 
+      - redis
+    # Use a consistent RMI registry port across all servers
+    command: ["./run-server.sh", "docker", "5128"]
+    networks:
+      - id-net
+    # No external port mapping needed for RMI when using the client container
+    # Expose a unique host port if you want host access to this container's Redis
+    ports:
+      - "6380:6379" # Expose Redis port
+
+  id-server-3:
+    build: .
+    hostname: id-server-3
+    depends_on:
+      - redis
+    # Use the same RMI registry port as other servers
+    command: ["./run-server.sh", "docker", "5128"]
+    networks:
+      - id-net
+    # No external port mapping needed for RMI when using the client container
+    ports:
+      - "6381:6379" # Expose Redis port
+
+  client:
+    build: .
+    depends_on:
+      - id-server-1
+      - id-server-2
+      - id-server-3
+    networks:
+      - id-net
+    command: tail -f /dev/null
+
+networks:
+  id-net:
+    driver: bridge
