@@ -1,233 +1,25 @@
 #!/bin/bash
-# for kai: sed -i 's/\r$//' run-server.sh
+# Starts one IdServer node inside its Docker container (see docker-compose.yml).
+# Usage: ./run-server.sh [registryPort]
+registryPort=${1:-5128}
 
-# Check the first argument provided to the script
-if [ "$1" == "numport" ]; then
-    make
-    echo
-    echo
-    # Commands to run if the input is "option1"
-    echo "Starting server with optional specified port command -n"
-    registryPort=$2
+# Each node has its own local Redis. It listens on all interfaces so that the
+# other nodes can replicate from it when this node is the coordinator.
+echo "Starting redis"
+redis-server --protected-mode no --daemonize yes > /dev/null
+until redis-cli ping > /dev/null 2>&1; do
+    echo "Waiting for Redis to start..."
+    sleep 1
+done
+echo "Redis started."
 
-    echo
-    echo "Killing existing rmiregistry"
-    killall -9 rmiregistry >& /dev/null
-    pkill rmiregistry
+echo "Starting rmiregistry on port $registryPort"
+export CLASSPATH=$(pwd):$CLASSPATH
+rmiregistry $registryPort &
+sleep 2
 
-    echo
-    echo "Starting new rmiregistry from $(pwd)"
-    export CLASSPATH=$(pwd):$CLASSPATH
-
-    rmiregistry $registryPort &
-
-    # wait for rmiregistry to start
-    sleep 2
-
-    echo
-    echo "Starting server"
-    echo
-    echo
-    redis-server --bind 127.0.0.1 > /dev/null 2> /dev/null &
-    # Give Redis a moment to start before pinging
-    sleep 2
-    # Wait for Redis to start
-    until redis-cli ping; do
-      echo "Waiting for Redis to start..."
-      sleep 1
-    done
-    echo "Redis started."
-    java -cp .:lib/* IdServer -n $registryPort
-    echo
-
-elif [ "$1" == "verbose" ]; then
-    make
-    echo
-    echo
-    echo "Starting server with optional verbose command -v"
-    registryPort=5128
-
-    echo
-    echo "Killing existing rmiregistry"
-    killall -9 rmiregistry >& /dev/null
-    pkill rmiregistry
-
-    echo
-    echo "Starting new rmiregistry from $(pwd)"
-    export CLASSPATH=$(pwd):$CLASSPATH
-
-    rmiregistry $registryPort &
-
-    # wait for rmiregistry to start
-    sleep 2
-
-    echo
-    echo "Starting server"
-    echo
-    echo
-    redis-server --bind 127.0.0.1 > /dev/null 2> /dev/null &
-    # Give Redis a moment to start before pinging
-    sleep 2
-    # Wait for Redis to start
-    until redis-cli ping; do
-      echo "Waiting for Redis to start..."
-      sleep 1
-    done
-    echo "Redis started."
-    java -cp .:lib/* IdServer $registryPort -v
-    echo
-
-elif [ "$1" == "both" ]; then
-    make
-    echo
-    echo
-    echo "Starting server with ALL optional commands"
-    echo "Enter the port for the server: "
-    read port
-    registryPort=$2
-
-    echo
-    echo "Killing existing rmiregistry"
-    killall -9 rmiregistry >& /dev/null
-    pkill rmiregistry
-
-    echo
-    echo "Starting new rmiregistry from $(pwd)"
-    export CLASSPATH=$(pwd):$CLASSPATH
-
-    rmiregistry $registryPort &
-
-    # wait for rmiregistry to start
-    sleep 2
-
-    echo
-    echo "Starting server"
-    echo
-    echo
-    redis-server --bind 127.0.0.1 > /dev/null 2> /dev/null &
-    # Give Redis a moment to start before pinging
-    sleep 2
-    # Wait for Redis to start
-    until redis-cli ping; do
-      echo "Waiting for Redis to start..."
-      sleep 1
-    done
-    echo "Redis started."
-    java -cp .:lib/* IdServer -n $registryPort -v
-    echo
-
-elif [ "$1" == "onyx" ]; then
-    echo
-    echo
-    echo "Building server(s) for onyx"
-    echo "All optional commands enabled"
-    echo "Enter the port for the server: "
-    registryPort=$2
-
-    make
-    echo
-    echo "Initializing redis database"
-    echo
-    echo "Killing existing rmiregistry"
-    killall -9 rmiregistry >& /dev/null
-    pkill rmiregistry
-
-    echo
-    echo "Starting new rmiregistry from $(pwd)"
-    export CLASSPATH=$(pwd):$CLASSPATH
-    
-    rmiregistry $registryPort &
-    sleep 2
-    echo
-    echo "Starting server"
-    echo
-    echo
-    redis-server --bind 127.0.0.1 > /dev/null 2> /dev/null &
-    # Give Redis a moment to start before pinging
-    sleep 2
-    # Wait for Redis to start
-    until redis-cli ping; do
-      echo "Waiting for Redis to start..."
-      sleep 1
-    done
-    echo "Redis started."
-    java -cp .:lib/* IdServer -s onyx.server -n $registryPort -v
-    echo
-
-
-elif [ "$1" == "docker" ]; then
-    echo
-    echo
-    echo "Building server(s) for docker"
-    echo "All optional commands enabled"
-    registryPort=$2
-
-    make
-    echo
-    echo "Initializing redis database"
-    echo
-    echo "Killing existing rmiregistry"
-    killall -9 rmiregistry >& /dev/null
-    pkill rmiregistry
-
-    echo
-    echo "Starting new rmiregistry from $(pwd)"
-    export CLASSPATH=$(pwd):$CLASSPATH
-    
-    rmiregistry $registryPort &
-    sleep 2
-    echo
-    echo "Starting server"
-    echo
-    echo
-    redis-server --bind 127.0.0.1 > /dev/null 2> /dev/null &
-    # Give Redis a moment to start before pinging
-    sleep 2
-    # Wait for Redis to start
-    until redis-cli ping; do
-      echo "Waiting for Redis to start..."
-      sleep 1
-    done
-    echo "Redis started."
-    java -cp .:lib/* IdServer -s docker.server -n $registryPort -v
-    echo
-
-
-else
-    # Default commands to run if no recognized input is provided
-    make
-    echo
-    echo
-    echo "Starting server with default commands."
-    registryPort=5128
-
-    echo
-    echo "Killing existing rmiregistry"
-    killall -9 rmiregistry >& /dev/null
-    pkill rmiregistry
-
-    echo
-    echo "Starting new rmiregistry from $(pwd)"
-    export CLASSPATH=$(pwd):$CLASSPATH
-
-    rmiregistry $registryPort &
-
-    # wait for rmiregistry to start
-    sleep 2
-
-    echo
-    echo "Starting server"
-    echo
-    echo
-    redis-server --bind 127.0.0.1 > /dev/null 2> /dev/null &
-    # Give Redis a moment to start before pinging
-    sleep 2
-    # Wait for Redis to start
-    until redis-cli ping; do
-      echo "Waiting for Redis to start..."
-      sleep 1
-    done
-    echo "Redis started."
-    java -cp .:lib/* IdServer -s onyx.server $registryPort
-    echo
-fi
+# java.rmi.server.hostname makes the RMI stub advertise this container's hostname
+# (id-server-N), which is what the TLS certificate is issued for.
+echo "Starting server"
+# The DNS cache TTLs are lowered so a restarted container's new IP is picked up.
+exec java -Djava.rmi.server.hostname=$(hostname) -Dsun.net.inetaddr.ttl=1 -Dsun.net.inetaddr.negative.ttl=1 -cp ".:lib/*" IdServer -s docker.server -n $registryPort -v

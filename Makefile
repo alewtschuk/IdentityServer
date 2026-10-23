@@ -1,5 +1,4 @@
 make:
-	redis-server > /dev/null 2> /dev/null &
 	javac -cp .:lib/* *.java
 
 .PHONY: clean

@@ -9,7 +9,7 @@ services:
     hostname: id-server-1
     depends_on:
       - redis
-    command: ["./run-server.sh", "docker", "5128"]
+    command: ["./run-server.sh", "5128"]
     networks:
       - id-net
     ports:
@@ -22,7 +22,7 @@ services:
     depends_on: 
       - redis
     # Use a consistent RMI registry port across all servers
-    command: ["./run-server.sh", "docker", "5128"]
+    command: ["./run-server.sh", "5128"]
     networks:
       - id-net
     # No external port mapping needed for RMI when using the client container
@@ -36,7 +36,7 @@ services:
     depends_on:
       - redis
     # Use the same RMI registry port as other servers
-    command: ["./run-server.sh", "docker", "5128"]
+    command: ["./run-server.sh", "5128"]
     networks:
       - id-net
     # No external port mapping needed for RMI when using the client container

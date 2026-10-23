@@ -262,7 +262,10 @@ public class IdClient {
 
 
             } catch (RemoteException | NotBoundException e) {
-                System.out.println(ERRORFLAG + "Failed to connect to " + host + ". Attempt " + (attempts + 1));
+                Throwable cause = e;
+                while (cause.getCause() != null) cause = cause.getCause();
+                System.out.println(ERRORFLAG + "Failed to connect to " + host + ". Attempt " + (attempts + 1)
+                        + " (" + cause.getMessage() + ")");
                 if (++attempts == serverHostList.size()) {
                     System.out.println(ERRORFLAG + "All server attempts failed.");
                     break;

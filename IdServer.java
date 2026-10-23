@@ -15,6 +15,7 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.net.Inet4Address;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.rmi.NotBoundException;
@@ -46,10 +47,13 @@ public class IdServer implements ServerInterface {
 
     // server coordination variables
     Object lock = new Object();
-    // Stable server identifier used for Bully priority (parsed from hostname)
-    private int serverNum;
-    private int state;
-    private int coordinator;
+    Object electionLock = new Object(); // guards state/coordinator transitions
+    // random "pid" used by the bully algorithm, assigned on startup (see whitepaper)
+    private final int serverNum = new Random().nextInt(10000) + 3;
+    private volatile int state;
+    private volatile int coordinator;
+    private int electionTicks = 0; // heartbeats spent in the election state
+    private int leaderlessTicks = 0; // heartbeats spent as a pleb with no known coordinator
 
     private static String serverFile;
     private static ArrayList<String> serverHosts = new ArrayList<String>();
@@ -60,12 +64,10 @@ public class IdServer implements ServerInterface {
     private int serverPort = 5126;
 
     private ServerSocket servSock;
-    private Inet4Address coordinatorAddy;
+    private volatile Inet4Address coordinatorAddy;
     private String myAddress;
     private String myHostName;
     private HashSet<String> connections; // for debugging
-    // Tracks whether any higher-priority peer is alive during the last heartbeat window
-    private volatile boolean higherAlive = false;
 
     private final int election = 0;
     private final int imPleb = 1;
@@ -97,93 +99,192 @@ public class IdServer implements ServerInterface {
      */
     public IdServer(String serverFile) throws RemoteException, IOException {
         processServerFile(serverFile);
-        pool.getResource().configSet("protected-mode", "no");
+        try (Jedis jedis = pool.getResource()) {
+            jedis.configSet("protected-mode", "no");
+        }
         // we can uncomment this if we want to implement a cache or something
         // this.accounts = new HashSet<IdAccount>();
         Runtime.getRuntime().addShutdownHook(new DeathToServer());
         System.out.println(SYSTEMFLAG + " Server " + serverNum + " established:");
 
-        // whenever a server is turned on, it triggers an election
-        this.state = election;
+        // a new server starts as a pleb and subordinates itself to an established
+        // coordinator. If none is heard from, the heartbeat starts an election.
+        this.state = imPleb;
         this.coordinator = 0;
-
-        // taking inspiration from hw2, this lock is used for the heartbeat and delays
-        // all ObjectOutputStream writes
-        Timer timer = new Timer();
-        TimerTask tt = new TimerTask() {
-            public void run() {
-                synchronized (lock) {
-                    lock.notifyAll();
-                }
-            }
-        };
-        timer.scheduleAtFixedRate(tt, 0, heartrate);
 
         // handling all listening and sending threads
         this.connections = new HashSet<String>();
         this.servSock = new ServerSocket(serverPort);
         this.myAddress = InetAddress.getLocalHost().getHostAddress();
         this.myHostName = InetAddress.getLocalHost().getHostName();
-        // Determine stable serverNum from hostname suffix (e.g., id-server-3 -> 3)
-        try {
-            String[] parts = this.myHostName.split("-");
-            this.serverNum = Integer.parseInt(parts[parts.length - 1]);
-        } catch (Exception e) {
-            // Fallback deterministic id based on last IP octet
-            try {
-                String[] ipParts = this.myAddress.split("\\.");
-                this.serverNum = Integer.parseInt(ipParts[ipParts.length - 1]);
-            } catch (Exception ignored) {
-                this.serverNum = 1 + new Random().nextInt(10000);
-            }
-        }
         if (verbosity)
             System.out.println(SYSTEMFLAG + "My address is " + myAddress);
         setupServerConnections();
 
-        // Deterministic fallback: if no leader emerges quickly, the highest id-server-N becomes boss
-        Timer fallbackTimer = new Timer();
-        fallbackTimer.schedule(new TimerTask() {
-            @Override
+        // taking inspiration from hw2, this lock is used for the heartbeat and delays
+        // all ObjectOutputStream writes. Each heartbeat also advances the election.
+        Timer timer = new Timer();
+        TimerTask tt = new TimerTask() {
             public void run() {
                 try {
-                    if (state != imBoss) {
-                        String chosen = null;
-                        int best = Integer.MIN_VALUE;
-                        for (String h : serverHosts) {
-                            String name = h.trim();
-                            int idx = -1;
-                            try {
-                                String[] parts = name.split("-");
-                                idx = Integer.parseInt(parts[parts.length - 1]);
-                            } catch (Exception ignore) {}
-                            if (idx > best) { best = idx; chosen = name; }
-                        }
-                        if (chosen != null && chosen.equalsIgnoreCase(myHostName)) {
-                            state = imBoss;
-                            coordinator = serverNum;
-                            pool.getResource().replicaofNoOne();
-                            coordinatorAddy = (Inet4Address) InetAddress.getByName(myAddress);
-                            System.out.println(SYSTEMFLAG + " I'M THE BOSS (" + serverNum + ") [fallback]");
-                        }
-                    }
+                    electionHeartbeat();
                 } catch (Exception e) {
-                    // ignore fallback errors
+                    e.printStackTrace(); // keep the heartbeat alive
+                }
+                synchronized (lock) {
+                    lock.notifyAll();
                 }
             }
-        }, heartrate + 1000); // wait slightly more than one heartbeat
+        };
+        timer.scheduleAtFixedRate(tt, 0, heartrate);
     }
 
     /**
-     * Establishes connections to all other servers that are alive, or sets up a
-     * listener for when they come alive.
+     * Establishes connections to all other servers. For every pair of servers
+     * exactly one side dials: a server dials the servers listed before it in the
+     * server file and accepts connections from the servers listed after it.
      */
     public void setupServerConnections() {
-        // connect to every server besides myself
+        int me = -1;
         for (int i = 0; i < serverHosts.size(); i++) {
-            serverListeners.add(new ServerListen(serverHosts.get(i), serverPort));
-            if (!serverHosts.get(i).equals(myAddress))
-                serverListeners.get(i).start();
+            if (isMe(serverHosts.get(i)))
+                me = i;
+        }
+        if (me == -1) {
+            System.out.println(ERRORFLAG + "This server (" + myHostName + ") is not listed in " + serverFile);
+            System.exit(1);
+        }
+
+        for (int i = 0; i < serverHosts.size(); i++) {
+            if (i == me)
+                continue;
+            ServerListen listener = new ServerListen(serverHosts.get(i), i < me);
+            serverListeners.add(listener);
+            listener.start();
+        }
+    }
+
+    /**
+     * Checks whether a host from the server file (hostname or IP) is this server
+     */
+    private boolean isMe(String host) {
+        if (host.equalsIgnoreCase(myHostName) || host.equals(myAddress))
+            return true;
+        try {
+            return InetAddress.getByName(host).getHostAddress().equals(myAddress);
+        } catch (IOException e) {
+            return false; // peer not resolvable yet, so it is not us
+        }
+    }
+
+    ////////////////////////
+    // BULLY ELECTION
+    ////////////////////////
+
+    /**
+     * Called once per heartbeat. A server that has been in an election for two
+     * heartbeats without hearing from a higher pid becomes the coordinator. A pleb
+     * that has not heard from any coordinator for four heartbeats starts an
+     * election. Four is long enough for a joining server to be reached by the
+     * others and hear an established coordinator first.
+     */
+    private void electionHeartbeat() {
+        synchronized (electionLock) {
+            if (state == election) {
+                if (++electionTicks >= 2)
+                    becomeBoss();
+            } else if (state == imPleb && coordinatorAddy == null) {
+                if (++leaderlessTicks >= 4)
+                    startElection();
+            }
+        }
+    }
+
+    private void startElection() {
+        synchronized (electionLock) {
+            if (verbosity)
+                System.out.println(SYSTEMFLAG + " Election triggered! (" + serverNum + ")");
+            state = election;
+            electionTicks = 0;
+            coordinator = 0;
+            coordinatorAddy = null;
+        }
+    }
+
+    private void becomeBoss() {
+        synchronized (electionLock) {
+            state = imBoss;
+            coordinator = serverNum;
+            try {
+                coordinatorAddy = (Inet4Address) InetAddress.getByName(myAddress);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            try (Jedis jedis = pool.getResource()) {
+                jedis.replicaofNoOne();
+            }
+            System.out.println(SYSTEMFLAG + " I'M THE BOSS (" + serverNum + ")");
+            if (verbosity)
+                System.out.println(SYSTEMFLAG + " My redis is now independent");
+        }
+    }
+
+    /**
+     * Handles a boss announcement. Any server that is not the boss subordinates
+     * itself, even if its pid is larger (whitepaper). If two servers both claim
+     * boss, the lower pid steps down.
+     */
+    private void followBoss(int bossNum, String bossHost) {
+        synchronized (electionLock) {
+            if (state == imBoss && bossNum < serverNum)
+                return;
+            boolean newBoss = coordinator != bossNum || coordinatorAddy == null;
+            state = imPleb;
+            leaderlessTicks = 0;
+            coordinator = bossNum;
+            if (!newBoss)
+                return;
+            try {
+                coordinatorAddy = (Inet4Address) InetAddress.getByName(bossHost);
+            } catch (IOException e) {
+                e.printStackTrace();
+                return;
+            }
+            System.out.println(SYSTEMFLAG + " Following coordinator " + bossNum + " at " + bossHost);
+            try (Jedis jedis = pool.getResource()) {
+                jedis.replicaof(bossHost, redisPort);
+            }
+            if (verbosity)
+                System.out.println(SYSTEMFLAG + "my redis is now a replica of " + bossHost + ":" + redisPort);
+        }
+    }
+
+    /**
+     * Handles an election message: a higher pid makes this server back down, a
+     * lower pid makes a leaderless server start its own election.
+     */
+    private void handleElection(int fromNum) {
+        synchronized (electionLock) {
+            if (fromNum > serverNum) {
+                if (state != imPleb && verbosity)
+                    System.out.println(SYSTEMFLAG + " I'm a pleb (" + serverNum + " < " + fromNum + ")");
+                if (state == election)
+                    state = imPleb;
+                if (state == imPleb && coordinatorAddy == null)
+                    leaderlessTicks = 0; // the higher server is still electing
+            } else if (state == imPleb && coordinatorAddy == null) {
+                startElection();
+            }
+        }
+    }
+
+    /**
+     * Handles a lost connection to another server
+     */
+    private void handleDisconnect(int lostNum) {
+        synchronized (electionLock) {
+            if (lostNum == coordinator && state != imBoss)
+                startElection();
         }
     }
 
@@ -247,10 +348,7 @@ public class IdServer implements ServerInterface {
                     jedis.set((acc.getUuid().toString() + "p").getBytes(), "null".getBytes());
                 else
                     jedis.set((acc.getUuid().toString() + "p").getBytes(), acc.getPassword());
-
-                jedis.wait(numServers, heartrate);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
+                // replicas catch up asynchronously (see whitepaper: Server Synchronization)
             }
         }
         // debug prints
@@ -720,27 +818,29 @@ public class IdServer implements ServerInterface {
     }
 
     /**
-     * A thread that either connects to a specific server IP or lists for that IP if
-     * it's not intially running
+     * A thread that maintains the connection to one other server. A dialer
+     * connects to its server (retrying until it is up); a non-dialer accepts the
+     * next incoming server connection. Either way it then reads that server's
+     * heartbeats and feeds them to the election.
      */
     private class ServerListen extends Thread {
+        private final String peerHost; // host from the server file, used for dialing
+        private final boolean dialer; // true if this side opens the connection
         private String connectionHost; // IP of connection
-        private int connectionPort; // port of connection
         private int conNum; // the fake PID for the servers
         private ServerSend toServer; // output stream thread
-        private boolean replicateData; // only replicate the data when necessary
 
         /**
          * CONSTRUCTOR
          * 
          * @param host
-         * @param servport
+         * @param dialer
          */
-        public ServerListen(String host, int servport) {
+        public ServerListen(String host, boolean dialer) {
+            this.peerHost = host;
             this.connectionHost = host;
-            this.connectionPort = servport;
+            this.dialer = dialer;
             this.toServer = null;
-            this.replicateData = true;
         }
 
         /**
@@ -755,53 +855,49 @@ public class IdServer implements ServerInterface {
         }
 
         /**
-         * Setter for the port of the connection.
-         * This was used for localhost running, but is no longer necessary when scalaing
-         * to multiple machines.
+         * Dials the peer until it answers, or waits for any peer to dial us
          */
-        private void setConnectionPort(int portNum) {
-            this.connectionPort = portNum;
+        private Socket connect() throws IOException, InterruptedException {
+            if (!dialer) {
+                Socket sock = servSock.accept();
+                System.out.println(COMMANDC + "CONNECTED TO " + sock.getInetAddress() + " port: "
+                        + sock.getPort() + RESET);
+                return sock;
+            }
+            // keep retrying so a server that comes back is reconnected, but only log
+            // the first failed attempt of each outage
+            boolean reported = false;
+            while (true) {
+                try {
+                    // resolve on every attempt (a restarted server can get a new IP) and do
+                    // not let a connect to a stopped server's old IP hang
+                    Socket sock = new Socket();
+                    sock.connect(new InetSocketAddress(peerHost, serverPort), heartrate / 2);
+                    if (verbosity)
+                        System.out.println(COMMANDC + " FOUND: " + peerHost + ":" + serverPort + RESET);
+                    return sock;
+                } catch (IOException e) {
+                    if (verbosity && !reported)
+                        System.out.println(ERRORFLAG + " server " + peerHost + ":" + serverPort
+                                + " not reachable, retrying in the background...");
+                    reported = true;
+                    Thread.sleep(heartrate / 2);
+                }
+            }
         }
 
         public void run() {
-            Socket sock;
             while (true) {
+                Socket sock = null;
+                conNum = 0;
                 try {
-                    // If the server is already running, connect to it. If it's not already running,
-                    // wait for it to connect.
-                    // Try-catch within a try-catch. This is what's wrong with society.
-                    try {
-                        if (connections.contains(connectionHost) || connectionHost.equals(myAddress)) {
-                            System.out.println(ERRORC + "TRYING TO RECONNECT TO " + connectionHost + RESET);
-                            throw new Exception();
-                        }
-                        if (verbosity)
-                            System.out.println(
-                                    "\n" + SYSTEMFLAG + " trying " + connectionHost + ":" + connectionPort + " ....");
-                        sock = new Socket(connectionHost, connectionPort);
-                        if (verbosity)
-                            System.out.println(COMMANDC + " FOUND: " + connectionHost + ":" + connectionPort + RESET);
-                        numServers++;
-                    } catch (Exception e) {
-                        if (verbosity)
-                            System.out.println(ERRORFLAG + " server " + connectionHost + ":" + connectionPort
-                                    + " not found, listening for future connection...");
-                        Thread.sleep(100);
-                        if (numServers == 0) {
-                            state = imBoss;
-                            coordinator = serverNum;
-                            pool.getResource().replicaofNoOne();
-                            System.out.println(SYSTEMFLAG + " I'M THE BOSS (" + serverNum + ")");
-                        }
-                        sock = servSock.accept();
-                        numServers++;
-                        System.out.println(COMMANDC + "CONNECTED TO " + sock.getInetAddress() + " port: "
-                                + sock.getPort() + RESET);
-                    }
-
-                    setConnectionHost(sock.getInetAddress().toString());
+                    sock = connect();
+                    // a server that stops sending heartbeats is treated as dead
+                    sock.setSoTimeout(heartrate * 3);
+                    setConnectionHost(sock.getInetAddress().getHostAddress());
 
                     ObjectOutputStream out = new ObjectOutputStream(sock.getOutputStream());
+                    out.flush(); // send the stream header now so the other side's input stream can open
                     ObjectInputStream in = new ObjectInputStream(sock.getInputStream());
 
                     // automatically sets up output stream
@@ -809,89 +905,43 @@ public class IdServer implements ServerInterface {
                     toServer.start();
 
                     // the rest of the method deals with the input stream
-                    int[] read = ((int[]) in.readObject());
-                    int readState = read[0];
-                    conNum = read[1];
-                    toServer.setConNum(conNum);
-                    connections.add(sock.getInetAddress().toString());
                     while (true) {
-                        read = ((int[]) in.readObject());
-
-                        readState = read[0];
+                        int[] read = ((int[]) in.readObject());
+                        int readState = read[0];
+                        if (conNum == 0) {
+                            numServers++;
+                            connections.add(connectionHost);
+                        }
                         conNum = read[1];
-                        setConnectionPort(read[2]);
-                        // System.out.println("received fsrom " + read[1] + ": " + readState);
-                        if (readState == imBoss) {
-                            // Only accept leadership from a strictly higher-priority server
-                            if (conNum > serverNum) {
-                                state = imPleb;
-                                coordinator = conNum;
-                                coordinatorAddy = (Inet4Address) InetAddress.getByName(connectionHost);
+                        toServer.setConNum(conNum);
 
-                                if (replicateData) {
-                                    String redisHost = coordinatorAddy.toString().startsWith("/")
-                                            ? coordinatorAddy.toString().substring(1)
-                                            : coordinatorAddy.toString();
-                                    pool.getResource().replicaof(redisHost, redisPort);
-                                    if (verbosity)
-                                        System.out.println(
-                                                SYSTEMFLAG + "my redis is now a replica of " + redisHost + ":" + redisPort);
-                                }
-                                this.replicateData = false;
-                                higherAlive = true; // remember a higher node is active
-                            } else {
-                                // Lower-priority peer claims boss; ignore
-                            }
-                        }
                         // part of the bully algorithm
-                        else if (readState == election) {
-                            // If a higher-priority peer is alive, note it. Only demote if not boss.
-                            if (conNum > serverNum) higherAlive = true;
-                            if (state != imBoss) {
-                                state = election;
-                                this.replicateData = true;
-                                if (conNum > serverNum) {
-                                    state = imPleb;
-                                    if (conNum > coordinator)
-                                        coordinator = conNum;
-                                    if (verbosity)
-                                        System.out.println(SYSTEMFLAG + " I'm a pleb (" + serverNum + " < " + conNum + ")");
-                                    toServer.sentElection = 0; // Reset sentElection if becoming a pleb
-                                }
-                            }
-                        }
-
-                        // for debugging
-                        // if(state == imPleb && replicateData == false) {
-                        // try (Jedis jedis = pool.getResource()) {
-                        // // Execute the INFO command specifically for replication
-                        // // String replicationInfo = jedis.info("replication");
-
-                        // // Output the replication information
-                        // System.out.println(replicationInfo);
-                        // }
-                        // }
-
+                        if (readState == imBoss)
+                            followBoss(conNum, connectionHost);
+                        else if (readState == election)
+                            handleElection(conNum);
                     }
 
                 } catch (IOException e) {
-                    System.out
-                            .println(ERRORFLAG + " Server " + connectionHost + ":" + connectionPort + " disconnected");
-                    // System.out.println("conNum that died: " + conNum + " coordinator: " +
-                    // coordinator);
-                    numServers--;
-
-                    if (conNum == coordinator) {
-                        if (verbosity)
-                            System.out.println(SYSTEMFLAG + " Election triggered!");
-                        state = election;
+                    if (conNum != 0) {
+                        System.out.println(
+                                ERRORFLAG + " Server " + conNum + " at " + connectionHost + " disconnected");
+                        numServers--;
+                        connections.remove(connectionHost);
+                        handleDisconnect(conNum);
                     }
-                    connections.remove(connectionHost);
                 } catch (ClassNotFoundException e) {
                     System.out.println(ERRORC + "Object read was not an array of integers" + RESET);
                     e.printStackTrace();
                 } catch (InterruptedException e) {
                     e.printStackTrace();
+                    return;
+                } finally {
+                    try {
+                        if (sock != null)
+                            sock.close();
+                    } catch (IOException ignored) {
+                    }
                 }
             }
         }
@@ -899,12 +949,11 @@ public class IdServer implements ServerInterface {
     }
 
     /**
-     * A thread that handles the output stream of a ServerListen thread
+     * A thread that handles the output stream of a ServerListen thread. It sends
+     * this server's state once per heartbeat.
      */
     private class ServerSend extends Thread {
         private ObjectOutputStream oos;
-        private int sentElection; // flag to make sure that a new coordinator waits for everyone to get their
-                                  // votes in
         private int conNum; // the fake PID for the servers
 
         /**
@@ -912,8 +961,6 @@ public class IdServer implements ServerInterface {
          */
         public ServerSend(ObjectOutputStream oos) {
             this.oos = oos;
-            this.sentElection = 0;
-            // this.running = true;
         }
 
         /**
@@ -922,9 +969,6 @@ public class IdServer implements ServerInterface {
         public void setConNum(int newNum) {
             this.conNum = newNum;
         }
-        // public void kill() {
-        // this.running = false;
-        // }
 
         public void run() {
             try {
@@ -933,32 +977,13 @@ public class IdServer implements ServerInterface {
                     synchronized (lock) {
                         lock.wait();
                     }
-
-                    // Approximate Bully: Only self-promote if no higher-priority node is alive
-                    if (state == election) {
-                        if (higherAlive) {
-                            sentElection = 0; // higher node active; keep waiting
-                        } else {
-                            sentElection++; // progress toward leadership
-                            if (sentElection >= 2) { // after a couple heartbeats without higher node, assume leadership
-                                state = imBoss;
-                                coordinator = serverNum;
-                                pool.getResource().replicaofNoOne();
-                                System.out.println(SYSTEMFLAG + " I'M THE BOSS (" + serverNum + ")");
-                                System.out.println(SYSTEMFLAG + " My redis is now independenta");
-                                sentElection = 0; // Reset after becoming boss
-                            }
-                        }
-                    }
                     int[] toSend = { state, serverNum, serverPort };
                     oos.writeObject(toSend);
                     oos.flush();
-                    // Reset observation for next heartbeat window
-                    higherAlive = false;
                 }
             } catch (IOException e) {
-                // this.running = false;
-                System.out.println(ERRORFLAG + " shutting down outputstream for " + conNum);
+                if (verbosity)
+                    System.out.println(ERRORFLAG + " shutting down outputstream for " + conNum);
             } catch (InterruptedException e) {
                 e.printStackTrace();
             }
