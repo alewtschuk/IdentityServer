@@ -33,6 +33,7 @@ import java.util.Timer;
 import java.util.TimerTask;
 import java.util.Random;
 import java.util.Scanner;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 import redis.clients.jedis.*;
 
@@ -51,9 +52,10 @@ public class IdServer implements ServerInterface {
     // random "pid" used by the bully algorithm, assigned on startup (see whitepaper)
     private final int serverNum = new Random().nextInt(10000) + 3;
     private volatile int state;
-    private volatile int coordinator;
+    private volatile int coordinatorPid; // pid of the current coordinator, 0 if unknown
     private int electionTicks = 0; // heartbeats spent in the election state
-    private int leaderlessTicks = 0; // heartbeats spent as a pleb with no known coordinator
+    private int leaderlessTicks = 0; // heartbeats spent as a replica with no known coordinator
+    private int deferredTo = 0; // highest electing pid this server has stood down for
 
     private static String serverFile;
     private static ArrayList<String> serverHosts = new ArrayList<String>();
@@ -69,20 +71,31 @@ public class IdServer implements ServerInterface {
     private String myHostName;
     private HashSet<String> connections; // for debugging
 
+    // writes the coordinator is waiting to see on every replica (eventual consistency)
+    private final ConcurrentLinkedQueue<PendingWrite> pendingWrites = new ConcurrentLinkedQueue<PendingWrite>();
+    private volatile boolean replicaSynced = false; // replica: initial sync with coordinator reported
+
     private final int election = 0;
-    private final int imPleb = 1;
-    private final int imBoss = 2;
+    private final int replica = 1;
+    private final int coordinator = 2;
 
     final static String RESET = "\u001B[0m";
     final static String ANSI_BLACK = "\u001B[30m";
     final static String ERRORC = "\u001B[31m";
     final static String COMMANDC = "\u001B[32m";
-    final static String ANSI_YELLOW = "\u001B[33m";
-    final static String ANSI_PURPLE = "\u001B[35m";
+    final static String REPLICAC = "\u001B[33m";
+    final static String ELECTIONC = "\u001B[34m";
+    final static String COORDINATORC = "\u001B[35m";
     final static String ACCOUNTC = "\u001B[36m";
     final static String ANSI_WHITE = "\u001B[37m";
+    final static String CLIENTC = "\u001B[1;37m"; // bold white
 
-    final static String SYSTEMFLAG = "[" + COMMANDC + "System" + RESET + "]";
+    // Log flags: [SYSTEM] generic server work, [ELECTION] bully algorithm,
+    // [COORDINATOR]/[REPLICA] role specific work, [CLIENT] client RMI calls
+    final static String SYSTEMFLAG = "[" + COMMANDC + "SYSTEM" + RESET + "]";
+    final static String ELECTIONFLAG = "[" + ELECTIONC + "ELECTION" + RESET + "]";
+    final static String COORDINATORFLAG = "[" + COORDINATORC + "COORDINATOR" + RESET + "]";
+    final static String REPLICAFLAG = "[" + REPLICAC + "REPLICA" + RESET + "]";
     final static String ERRORFLAG = "[" + ERRORC + "ERROR" + RESET + "]";
     final static String IP_PATTERN = "^(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)\\." +
             "(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)\\." +
@@ -105,12 +118,12 @@ public class IdServer implements ServerInterface {
         // we can uncomment this if we want to implement a cache or something
         // this.accounts = new HashSet<IdAccount>();
         Runtime.getRuntime().addShutdownHook(new DeathToServer());
-        System.out.println(SYSTEMFLAG + " Server " + serverNum + " established:");
+        System.out.println(SYSTEMFLAG + " Server established with \"PID\": " + serverNum);
 
-        // a new server starts as a pleb and subordinates itself to an established
+        // a new server starts as a replica and subordinates itself to an established
         // coordinator. If none is heard from, the heartbeat starts an election.
-        this.state = imPleb;
-        this.coordinator = 0;
+        this.state = replica;
+        this.coordinatorPid = 0;
 
         // handling all listening and sending threads
         this.connections = new HashSet<String>();
@@ -118,8 +131,9 @@ public class IdServer implements ServerInterface {
         this.myAddress = InetAddress.getLocalHost().getHostAddress();
         this.myHostName = InetAddress.getLocalHost().getHostName();
         if (verbosity)
-            System.out.println(SYSTEMFLAG + "My address is " + myAddress);
+            System.out.println(SYSTEMFLAG + " Server address is " + myAddress);
         setupServerConnections();
+        new ReplicationListener().start();
 
         // taking inspiration from hw2, this lock is used for the heartbeat and delays
         // all ObjectOutputStream writes. Each heartbeat also advances the election.
@@ -137,6 +151,18 @@ public class IdServer implements ServerInterface {
             }
         };
         timer.scheduleAtFixedRate(tt, 0, heartrate);
+
+        // checks replication progress more often than the heartbeat so the logs show
+        // when replicas catch up with the coordinator
+        timer.scheduleAtFixedRate(new TimerTask() {
+            public void run() {
+                try {
+                    checkReplication();
+                } catch (Exception e) {
+                    e.printStackTrace(); // keep the timer alive
+                }
+            }
+        }, heartrate, heartrate / 4);
     }
 
     /**
@@ -151,7 +177,7 @@ public class IdServer implements ServerInterface {
                 me = i;
         }
         if (me == -1) {
-            System.out.println(ERRORFLAG + "This server (" + myHostName + ") is not listed in " + serverFile);
+            System.out.println(ERRORFLAG + " This server (" + myHostName + ") is not listed in " + serverFile);
             System.exit(1);
         }
 
@@ -183,8 +209,8 @@ public class IdServer implements ServerInterface {
 
     /**
      * Called once per heartbeat. A server that has been in an election for two
-     * heartbeats without hearing from a higher pid becomes the coordinator. A pleb
-     * that has not heard from any coordinator for four heartbeats starts an
+     * heartbeats without hearing from a higher pid becomes the coordinator. A
+     * replica that has not heard from any coordinator for four heartbeats starts an
      * election. Four is long enough for a joining server to be reached by the
      * others and hear an established coordinator first.
      */
@@ -192,8 +218,8 @@ public class IdServer implements ServerInterface {
         synchronized (electionLock) {
             if (state == election) {
                 if (++electionTicks >= 2)
-                    becomeBoss();
-            } else if (state == imPleb && coordinatorAddy == null) {
+                    becomeCoord();
+            } else if (state == replica && coordinatorAddy == null) {
                 if (++leaderlessTicks >= 4)
                     startElection();
             }
@@ -203,18 +229,19 @@ public class IdServer implements ServerInterface {
     private void startElection() {
         synchronized (electionLock) {
             if (verbosity)
-                System.out.println(SYSTEMFLAG + " Election triggered! (" + serverNum + ")");
+                System.out.println(ELECTIONFLAG + " Election triggered! (" + serverNum + ")");
             state = election;
             electionTicks = 0;
-            coordinator = 0;
+            deferredTo = 0;
+            coordinatorPid = 0;
             coordinatorAddy = null;
         }
     }
 
-    private void becomeBoss() {
+    private void becomeCoord() {
         synchronized (electionLock) {
-            state = imBoss;
-            coordinator = serverNum;
+            state = coordinator;
+            coordinatorPid = serverNum;
             try {
                 coordinatorAddy = (Inet4Address) InetAddress.getByName(myAddress);
             } catch (IOException e) {
@@ -223,39 +250,42 @@ public class IdServer implements ServerInterface {
             try (Jedis jedis = pool.getResource()) {
                 jedis.replicaofNoOne();
             }
-            System.out.println(SYSTEMFLAG + " I'M THE BOSS (" + serverNum + ")");
+            pendingWrites.clear();
+            System.out.println(COORDINATORFLAG + " COORDINATOR SERVER CHOSEN server = " + serverNum);
             if (verbosity)
-                System.out.println(SYSTEMFLAG + " My redis is now independent");
+                System.out.println(COORDINATORFLAG + " Coordinator redis is now independent and source of truth");
         }
     }
 
     /**
-     * Handles a boss announcement. Any server that is not the boss subordinates
-     * itself, even if its pid is larger (whitepaper). If two servers both claim
-     * boss, the lower pid steps down.
+     * Handles a coordinator announcement. Any server that is not the coordinator
+     * subordinates itself, even if its pid is larger (whitepaper). If two servers
+     * both claim coordinator, the lower pid steps down.
      */
-    private void followBoss(int bossNum, String bossHost) {
+    private void followCoordinator(int coordinatorNum, String coordinatorHost) {
         synchronized (electionLock) {
-            if (state == imBoss && bossNum < serverNum)
+            if (state == coordinator && coordinatorNum < serverNum)
                 return;
-            boolean newBoss = coordinator != bossNum || coordinatorAddy == null;
-            state = imPleb;
+            boolean newCoordinator = coordinatorPid != coordinatorNum || coordinatorAddy == null;
+            state = replica;
             leaderlessTicks = 0;
-            coordinator = bossNum;
-            if (!newBoss)
+            deferredTo = 0;
+            coordinatorPid = coordinatorNum;
+            if (!newCoordinator)
                 return;
+            replicaSynced = false;
             try {
-                coordinatorAddy = (Inet4Address) InetAddress.getByName(bossHost);
+                coordinatorAddy = (Inet4Address) InetAddress.getByName(coordinatorHost);
             } catch (IOException e) {
                 e.printStackTrace();
                 return;
             }
-            System.out.println(SYSTEMFLAG + " Following coordinator " + bossNum + " at " + bossHost);
+            System.out.println(REPLICAFLAG + " Following coordinator " + coordinatorNum + " at " + coordinatorHost);
             try (Jedis jedis = pool.getResource()) {
-                jedis.replicaof(bossHost, redisPort);
+                jedis.replicaof(coordinatorHost, redisPort);
             }
             if (verbosity)
-                System.out.println(SYSTEMFLAG + "my redis is now a replica of " + bossHost + ":" + redisPort);
+                System.out.println(REPLICAFLAG + " Redis is now a replica of " + coordinatorHost + ":" + redisPort);
         }
     }
 
@@ -266,13 +296,14 @@ public class IdServer implements ServerInterface {
     private void handleElection(int fromNum) {
         synchronized (electionLock) {
             if (fromNum > serverNum) {
-                if (state != imPleb && verbosity)
-                    System.out.println(SYSTEMFLAG + " I'm a pleb (" + serverNum + " < " + fromNum + ")");
+                if (fromNum > deferredTo && verbosity)
+                    System.out.println(ELECTIONFLAG + " Higher pid found, standing down (" + serverNum + " < " + fromNum + ")");
+                deferredTo = Math.max(deferredTo, fromNum);
                 if (state == election)
-                    state = imPleb;
-                if (state == imPleb && coordinatorAddy == null)
+                    state = replica;
+                if (state == replica && coordinatorAddy == null)
                     leaderlessTicks = 0; // the higher server is still electing
-            } else if (state == imPleb && coordinatorAddy == null) {
+            } else if (state == replica && coordinatorAddy == null) {
                 startElection();
             }
         }
@@ -283,7 +314,7 @@ public class IdServer implements ServerInterface {
      */
     private void handleDisconnect(int lostNum) {
         synchronized (electionLock) {
-            if (lostNum == coordinator && state != imBoss)
+            if (lostNum == coordinatorPid && state != coordinator)
                 startElection();
         }
     }
@@ -305,14 +336,189 @@ public class IdServer implements ServerInterface {
             }
 
             if (serverHosts.isEmpty()) {
-                System.out.println(ERRORFLAG + "No valid server addresses found in file.");
+                System.out.println(ERRORFLAG + " No valid server addresses found in file.");
                 System.exit(1);
             }
 
         } catch (Exception e) {
-            System.out.println(ERRORFLAG + "Problem reading server file: " + e.getMessage());
+            System.out.println(ERRORFLAG + " Problem reading server file: " + e.getMessage());
             System.exit(1);
         }
+    }
+
+    ////////////////////////
+    // REPLICATION LOGGING
+    ////////////////////////
+
+    /**
+     * A client write the coordinator has applied, and the replication offset its
+     * replicas must reach before they hold it too
+     */
+    private static class PendingWrite {
+        final String description;
+        final long offset;
+        final long writtenAt = System.currentTimeMillis();
+
+        PendingWrite(String description, long offset) {
+            this.description = description;
+            this.offset = offset;
+        }
+    }
+
+    /**
+     * Called by the coordinator after a client write. Replication itself is done
+     * by redis asynchronously; this only records the write so checkReplication()
+     * can log when every replica has it.
+     */
+    private void trackReplication(String description) {
+        try (Jedis jedis = pool.getResource()) {
+            Map<String, String> info = replicationInfo(jedis);
+            pendingWrites.add(new PendingWrite(description, Long.parseLong(info.get("master_repl_offset"))));
+        }
+    }
+
+    /**
+     * Logs replication progress. On the coordinator: when every connected replica
+     * has acknowledged a tracked write. On a replica: when its initial sync with
+     * the coordinator has finished.
+     */
+    private void checkReplication() {
+        if (state == coordinator && !pendingWrites.isEmpty()) {
+            Map<String, String> info;
+            try (Jedis jedis = pool.getResource()) {
+                info = replicationInfo(jedis);
+            }
+            int replicas = Integer.parseInt(info.get("connected_slaves"));
+            for (PendingWrite write = pendingWrites.peek(); write != null; write = pendingWrites.peek()) {
+                if (replicas == 0) {
+                    System.out.println(COORDINATORFLAG + " " + write.description
+                            + " stored on coordinator only (no replicas connected)");
+                    pendingWrites.poll();
+                    continue;
+                }
+                int caughtUp = 0;
+                for (int i = 0; i < replicas; i++) {
+                    String replica = info.get("slave" + i); // ip=..,port=..,state=online,offset=..,lag=..
+                    if (replica != null && replicaOffset(replica) >= write.offset)
+                        caughtUp++;
+                }
+                if (caughtUp == replicas) {
+                    System.out.println(COORDINATORFLAG + " " + write.description + " replicated to " + caughtUp
+                            + "/" + replicas + " replicas, eventual consistency reached");
+                } else if (System.currentTimeMillis() - write.writtenAt > heartrate * 5) {
+                    System.out.println(COORDINATORFLAG + ERRORFLAG + " " + write.description + " reached only " + caughtUp + "/"
+                            + replicas + " replicas so far, no longer tracking it");
+                } else {
+                    break; // later writes cannot be caught up before this one
+                }
+                pendingWrites.poll();
+            }
+        } else if (state == replica && coordinatorAddy != null && !replicaSynced) {
+            try (Jedis jedis = pool.getResource()) {
+                Map<String, String> info = replicationInfo(jedis);
+                if ("up".equals(info.get("master_link_status")) && "0".equals(info.get("master_sync_in_progress"))) {
+                    replicaSynced = true;
+                    System.out.println(REPLICAFLAG + " Synced with coordinator " + coordinatorPid + ", holding "
+                            + jedis.dbSize() + " keys");
+                }
+            }
+        }
+    }
+
+    /**
+     * Parses redis "INFO replication" into key/value pairs
+     */
+    private static Map<String, String> replicationInfo(Jedis jedis) {
+        Map<String, String> info = new HashMap<String, String>();
+        for (String line : jedis.info("replication").split("\r?\n")) {
+            int colon = line.indexOf(':');
+            if (colon > 0)
+                info.put(line.substring(0, colon), line.substring(colon + 1).trim());
+        }
+        return info;
+    }
+
+    /**
+     * Pulls the acknowledged offset out of a "slaveN" INFO replication entry
+     */
+    private static long replicaOffset(String replica) {
+        for (String field : replica.split(",")) {
+            if (field.startsWith("offset="))
+                return Long.parseLong(field.substring("offset=".length()));
+        }
+        return -1;
+    }
+
+    /**
+     * Listens to this server's redis for writes. On a replica every write comes
+     * from the coordinator, so each one is logged as a replicated change.
+     */
+    private class ReplicationListener extends Thread {
+        private final Pattern uuidKey = Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}p?");
+
+        public void run() {
+            while (true) {
+                try (Jedis jedis = new Jedis("localhost", redisPort)) {
+                    // keyevent notifications for hash, string and generic (del) commands
+                    jedis.configSet("notify-keyspace-events", "Eh$g");
+                    jedis.psubscribe(new JedisPubSub() {
+                        @Override
+                        public void onPMessage(String pattern, String channel, String key) {
+                            // each account is stored under its username, its uuid and uuid + "p";
+                            // only the username key is logged
+                            if (state != replica || uuidKey.matcher(key).matches())
+                                return;
+                            String event = channel.substring(channel.indexOf(':') + 1);
+                            if (event.equals("hset"))
+                                System.out.println(REPLICAFLAG + " Replicated account \"" + key + "\" from coordinator");
+                            else if (event.equals("del"))
+                                System.out.println(REPLICAFLAG + " Replicated removal of account \"" + key
+                                        + "\" from coordinator");
+                        }
+                    }, "__keyevent@0__:*");
+                } catch (Exception e) {
+                    try {
+                        Thread.sleep(heartrate); // redis restarting, subscribe again
+                    } catch (InterruptedException ie) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    ////////////////////////
+    // LOGGING HELPERS
+    ////////////////////////
+
+    /**
+     * Flag for this server's current role
+     */
+    private String roleFlag() {
+        if (state == coordinator)
+            return COORDINATORFLAG;
+        if (state == election)
+            return ELECTIONFLAG;
+        return coordinatorAddy == null ? SYSTEMFLAG : REPLICAFLAG; // no coordinator found yet
+    }
+
+    /**
+     * Flag for a log line produced while serving a client RMI call
+     */
+    private String rmiFlag() {
+        return roleFlag() + "[" + CLIENTC + "CLIENT" + RESET + "]";
+    }
+
+    /**
+     * Shortened hex form of a password hash for the logs: first and last 4 digits
+     */
+    private static String shortHash(byte[] bytes) {
+        if (bytes == null)
+            return "none";
+        StringBuilder out = new StringBuilder();
+        for (byte b : bytes)
+            out.append(String.format("%02x", b));
+        return out.substring(0, 4) + "..." + out.substring(out.length() - 4);
     }
 
     ///////////////////////////////
@@ -339,10 +545,9 @@ public class IdServer implements ServerInterface {
                 accMap.put("recent ip", acc.getRecentIp());
                 jedis.hset(acc.getUsername(), accMap);
                 jedis.hset(acc.getUuid().toString(), accMap);
-                System.out.println("Account stored under \"" + acc.getUsername() + "\"");
-                System.out.println("Account stored under \"" + acc.getUuid().toString() + "\"");
-
-                System.out.println("Storing password under " + acc.getUuid().toString() + "p: " + acc.getPassword());
+                if (verbosity)
+                    System.out.println(COORDINATORFLAG + " Stored account \"" + acc.getUsername()
+                            + "\" in redis, password hash " + shortHash(acc.getPassword()));
                 // writes the password separately
                 if (acc.getPassword() == null)
                     jedis.set((acc.getUuid().toString() + "p").getBytes(), "null".getBytes());
@@ -351,9 +556,6 @@ public class IdServer implements ServerInterface {
                 // replicas catch up asynchronously (see whitepaper: Server Synchronization)
             }
         }
-        // debug prints
-        if (verbosity)
-            System.out.println(SYSTEMFLAG + " Account: " + acc.getUsername() + " to database.");
     }
 
     // searches redis for entry of account by username
@@ -365,7 +567,8 @@ public class IdServer implements ServerInterface {
      * @param username
      */
     private IdAccount readAccount(String username) {
-        System.out.println("readAccount called for \"" + username + "\"");
+        if (verbosity)
+            System.out.println(COORDINATORFLAG + " Reading account \"" + username + "\" from redis");
         IdAccount skeeyyah;
         synchronized (this) {
             try (Jedis jedis = pool.getResource()) {
@@ -373,7 +576,6 @@ public class IdServer implements ServerInterface {
                     return null;
 
                 Map<String, String> accMap = jedis.hgetAll(username);
-                System.out.println(accMap.get("username"));
                 skeeyyah = new IdAccount(
                         accMap.get("username"),
                         accMap.get("realName"),
@@ -402,7 +604,8 @@ public class IdServer implements ServerInterface {
      * @param uuid
      */
     private IdAccount readAccount(UUID uuid) {
-        System.out.println("readAccount called for \"" + uuid.toString() + "\"");
+        if (verbosity)
+            System.out.println(COORDINATORFLAG + " Reading account \"" + uuid + "\" from redis");
 
         String uuidString = uuid.toString();
         IdAccount skeeyyah;
@@ -412,7 +615,6 @@ public class IdServer implements ServerInterface {
                     return null;
 
                 Map<String, String> accMap = jedis.hgetAll(uuidString);
-                System.out.println(accMap.get("uuid"));
                 skeeyyah = new IdAccount(
                         accMap.get("username"),
                         accMap.get("realName"),
@@ -443,9 +645,9 @@ public class IdServer implements ServerInterface {
             try (Jedis jedis = pool.getResource()) {
                 ArrayList<IdAccount> allAccounts = new ArrayList<IdAccount>();
                 Set<String> keys = jedis.keys("*");
-                System.out.println("keys: " + keys.toString());
+                if (verbosity)
+                    System.out.println(COORDINATORFLAG + " Scanning " + keys.size() + " redis keys for accounts");
                 for (String key : keys) {
-                    System.out.println(key);
                     if (keys.contains(key + "p")) {
                         allAccounts.add(readAccount(key));
                     }
@@ -467,13 +669,10 @@ public class IdServer implements ServerInterface {
         synchronized (this) {
             try (Jedis jedis = pool.getResource()) {
                 jedis.del(username); // delete username entry
-                jedis.wait(numServers, heartrate);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
             }
         }
         if (verbosity)
-            System.out.println(SYSTEMFLAG + "Account \"" + username + " removed");
+            System.out.println(COORDINATORFLAG + " Account \"" + username + "\" removed from redis");
     }
 
     /**
@@ -492,7 +691,7 @@ public class IdServer implements ServerInterface {
             }
         }
         if (verbosity)
-            System.out.println(SYSTEMFLAG + "Account \"" + username + " removed");
+            System.out.println(COORDINATORFLAG + " Account \"" + username + "\" removed from redis");
     }
 
     /**
@@ -521,11 +720,14 @@ public class IdServer implements ServerInterface {
     ////////////////////////
 
     /**
-     * Getter for the server state [election || subordinate || coordinator]
+     * Getter for the server state [election (0) || replica (1) || coordinator (2)]
      * 
      * @return state
      */
     public int getState() {
+        if (verbosity)
+            System.out.println(rmiFlag() + " Client checking server role: "
+                    + (state == coordinator ? "coordinator" : state == replica ? "replica" : "election in progress"));
         return state;
     }
 
@@ -540,14 +742,13 @@ public class IdServer implements ServerInterface {
      */
     public String createAccount(String username, String realname, byte[] password, String ipAddress) {
         if (verbosity) {
-            System.out.println(SYSTEMFLAG + COMMANDC + " called --create" + RESET);
+            System.out.println(rmiFlag() + " Request to create account \"" + username + "\"");
         }
 
         IdAccount acc = readAccount(username);
         if (acc != null) {
             if (verbosity) {
-                System.out.println(ERRORFLAG + " Account with name " + ACCOUNTC + username + RESET
-                        + " already exists. Please choose another name.");
+                System.out.println(rmiFlag() + ERRORC + " Account \"" + username + "\" already exists" + RESET);
             }
             return ERRORC + " Account with name " + ACCOUNTC + username + RESET
                     + " already exists. Please choose another name." + RESET;
@@ -563,14 +764,15 @@ public class IdServer implements ServerInterface {
         }
 
         if (verbosity) {
-            System.out.println(ACCOUNTC + " == ACCOUNT CREATED ==" + RESET);
-            System.out.println(ACCOUNTC + newAcc.toString() + "\n" + RESET);
+            System.out.println(rmiFlag() + ACCOUNTC + " Account created: \"" + newAcc.getUsername() + "\" ("
+                    + newAcc.getRealname() + "), UUID " + newAcc.getUuid() + ", from " + ipAddress + RESET);
         }
         newAcc.setDateModified(java.time.LocalDateTime.now());
         newAcc.setRecentIp(ipAddress);
 
         // accounts.add(newAcc);
         writeAccount(newAcc);
+        trackReplication("Create of \"" + username + "\"");
         return ACCOUNTC + "Account " + username + " created on server." + RESET;
     }
 
@@ -583,20 +785,20 @@ public class IdServer implements ServerInterface {
      */
     public String lookupUser(String username, String recentIp) {
         if (verbosity) {
-            System.out.println(SYSTEMFLAG + COMMANDC + " called --lookup" + RESET);
+            System.out.println(rmiFlag() + " Request to look up account \"" + username + "\"");
         }
 
         IdAccount acc = readAccount(username);
         if (acc != null) {
             if (verbosity) {
-                System.out.println(SYSTEMFLAG + ACCOUNTC + "Account found: " + username + "\n" + RESET);
+                System.out.println(rmiFlag() + ACCOUNTC + " Account found: " + username + RESET);
             }
             acc.setRecentIp(recentIp);
             return acc.toString();
         }
 
         if (verbosity) {
-            System.out.println(ERRORFLAG + ACCOUNTC + "Account not found: " + username + "\n" + RESET);
+            System.out.println(rmiFlag() + ERRORC + " Account not found: " + username + RESET);
         }
         return ERRORC + "[ERROR] user " + username + " not found" + RESET;
     }
@@ -610,7 +812,7 @@ public class IdServer implements ServerInterface {
      */
     public String lookupUUID(String uuid, String recentIp) {
         if (verbosity) {
-            System.out.println(SYSTEMFLAG + COMMANDC + " called --reverse-lookup" + RESET);
+            System.out.println(rmiFlag() + " Request to look up UUID \"" + uuid + "\"");
         }
 
         // the reason I turn this into a UUID and back to a string is because I haven't
@@ -620,14 +822,14 @@ public class IdServer implements ServerInterface {
 
         if (acc != null) {
             if (verbosity) {
-                System.out.println(SYSTEMFLAG + ACCOUNTC + "Account found: " + uuid + "\n" + RESET);
+                System.out.println(rmiFlag() + ACCOUNTC + " Account found: " + uuid + RESET);
             }
             acc.setDateModified(java.time.LocalDateTime.now());
             return acc.toString();
         }
 
         if (verbosity) {
-            System.out.println(ERRORFLAG + ACCOUNTC + "Account not found: " + uuid + "\n" + RESET);
+            System.out.println(rmiFlag() + ERRORC + " Account not found: " + uuid + RESET);
         }
         return ERRORC + "[ERROR] user " + uuid + "not found" + RESET;
     }
@@ -643,14 +845,13 @@ public class IdServer implements ServerInterface {
      */
     public String changeUsername(String oldName, String newName, byte[] password, String recentIp) {
         if (verbosity) {
-            System.out.println(SYSTEMFLAG + COMMANDC + " called --modify" + RESET);
+            System.out.println(rmiFlag() + " Request to rename account \"" + oldName + "\" to \"" + newName + "\"");
         }
 
         IdAccount acc = readAccount(newName);
         if (acc != null) {
             if (verbosity) {
-                System.out.println(ERRORFLAG + " Account with name " + newName
-                        + " already exists. Please choose another name." + RESET);
+                System.out.println(rmiFlag() + ERRORC + " Account \"" + newName + "\" already exists" + RESET);
             }
             acc.setDateModified(java.time.LocalDateTime.now());
             return ERRORC + "[ERROR] Account with name " + newName + " already exists. Please choose another name."
@@ -658,10 +859,15 @@ public class IdServer implements ServerInterface {
         }
 
         acc = readAccount(oldName);
-        System.out.println("password for " + acc.getUsername() + ": " + acc.getPassword());
+        if (acc == null) {
+            if (verbosity)
+                System.out.println(rmiFlag() + ERRORC + " Account not found: " + oldName + RESET);
+            return ERRORC + "[ERROR] NO ACCOUNT FOUND OR ACCOUNT NOT CREATED" + RESET;
+        }
         {
             if (verbosity) {
-                System.out.println(ERRORFLAG + ACCOUNTC + "Account found: " + oldName + "\n" + RESET);
+                System.out.println(rmiFlag() + ACCOUNTC + " Account found: " + oldName + RESET);
+                System.out.println(rmiFlag() + " Stored password hash: " + shortHash(acc.getPassword()));
             }
             if (password == null && acc.getPassword() != null) {
                 return ERRORC + "[ERROR] PASSWORD ASSOCIATED WITH ACCOUNT WAS NOT ENTERED" + RESET;
@@ -670,8 +876,9 @@ public class IdServer implements ServerInterface {
                 acc.setUsername(newName); // NO PASSWORD
                 writeAccount(acc);
                 deleteUsernameEntry(oldName);
+                trackReplication("Rename of \"" + oldName + "\" to \"" + newName + "\"");
                 if (verbosity) {
-                    System.out.println(SYSTEMFLAG + ACCOUNTC + "No password associated with account." + RESET);
+                    System.out.println(rmiFlag() + ACCOUNTC + " No password associated with account" + RESET);
                 }
                 return ACCOUNTC + "Account " + oldName + " found and login name updated to " + newName;
             } else if (checkPassword(acc.getPassword(), password)) {
@@ -679,13 +886,16 @@ public class IdServer implements ServerInterface {
                 acc.setUsername(newName);
                 writeAccount(acc);
                 deleteUsernameEntry(oldName);
+                trackReplication("Rename of \"" + oldName + "\" to \"" + newName + "\"");
                 if (verbosity) {
-                    System.out.println(SYSTEMFLAG + ACCOUNTC + "Password associated with account is correct." + RESET);
+                    System.out.println(rmiFlag() + ACCOUNTC + " Password hash matches" + RESET);
                 }
                 return ACCOUNTC + "Account " + oldName + " found and login name updated to " + newName;
             } else {
                 acc.setDateModified(java.time.LocalDateTime.now());
                 writeAccount(acc);
+                if (verbosity)
+                    System.out.println(rmiFlag() + ERRORC + " Password hash does not match" + RESET);
                 return ERRORC + "[ERROR] PASSWORD DENIED" + RESET;
             }
         }
@@ -701,23 +911,25 @@ public class IdServer implements ServerInterface {
      */
     public String deleteAccount(String username, byte[] password) {
         if (verbosity) {
-            System.out.println(SYSTEMFLAG + COMMANDC + " called --delete" + RESET);
+            System.out.println(rmiFlag() + " Request to delete account \"" + username + "\"");
         }
 
         IdAccount acc = readAccount(username);
         if (acc != null) {
             if (verbosity) {
-                System.out.println(SYSTEMFLAG + ACCOUNTC + "Account found: " + username + "\n" + RESET);
+                System.out.println(rmiFlag() + ACCOUNTC + " Account found: " + username + RESET);
             }
             if (password == null && acc.getPassword() != null) {
                 return ERRORC + "[ERROR] PASSWORD ASSOCIATED WITH ACCOUNT WAS NOT ENTERED" + RESET;
             } else if (acc.getPassword() == null) {
                 // accounts.remove(acc);
                 deleteAccount(username);
+                trackReplication("Delete of \"" + username + "\"");
                 return ACCOUNTC + "Account \"" + username + "\" removed." + RESET;
             } else if (checkPassword(acc.getPassword(), password)) {
                 // accounts.remove(acc);
                 deleteAccount(username);
+                trackReplication("Delete of \"" + username + "\"");
                 return ACCOUNTC + "Account \"" + username + "\" removed." + RESET;
             } else
                 return ERRORC + "[ERROR] PASSWORD DENIED" + RESET;
@@ -735,7 +947,7 @@ public class IdServer implements ServerInterface {
      */
     public String getAccounts(String attribute) {
         if (verbosity == true) {
-            System.out.println(SYSTEMFLAG + COMMANDC + " called --get" + RESET);
+            System.out.println(rmiFlag() + " Request to list accounts (" + attribute + ")");
         }
         String out = null;
         int i = 0;
@@ -774,6 +986,9 @@ public class IdServer implements ServerInterface {
      * @return Inet4Address of coordinator
      */
     public Inet4Address getCoordinator() throws RemoteException {
+        if (verbosity)
+            System.out.println(rmiFlag() + " Client redirected to coordinator at "
+                    + (coordinatorAddy == null ? "unknown" : coordinatorAddy.getHostAddress()));
         return coordinatorAddy;
     }
 
@@ -784,7 +999,7 @@ public class IdServer implements ServerInterface {
      */
     public void setVerbose(boolean verbosity) {
         verbosity = true;
-        System.out.println(SYSTEMFLAG + "Verbsoity set to " + COMMANDC + verbosity + RESET);
+        System.out.println(SYSTEMFLAG + " Verbosity set to " + COMMANDC + verbosity + RESET);
     }
 
     /**
@@ -797,7 +1012,7 @@ public class IdServer implements ServerInterface {
          */
         public void run() {
             deathToRMI();
-            System.out.println("\n\n" + SYSTEMFLAG + ERRORC + "!!!!SERVER SHUTTING DOWN!!!!" + RESET);
+            System.out.println(roleFlag() + ERRORC + " !!!!SERVER SHUTTING DOWN!!!!" + RESET);
         }
 
         /**
@@ -829,6 +1044,7 @@ public class IdServer implements ServerInterface {
         private String connectionHost; // IP of connection
         private int conNum; // the fake PID for the servers
         private ServerSend toServer; // output stream thread
+        private boolean everConnected = false; // false until the first connection to this peer
 
         /**
          * CONSTRUCTOR
@@ -860,8 +1076,7 @@ public class IdServer implements ServerInterface {
         private Socket connect() throws IOException, InterruptedException {
             if (!dialer) {
                 Socket sock = servSock.accept();
-                System.out.println(COMMANDC + "CONNECTED TO " + sock.getInetAddress() + " port: "
-                        + sock.getPort() + RESET);
+                System.out.println(SYSTEMFLAG + " Peer server connected from " + sock.getInetAddress().getHostAddress());
                 return sock;
             }
             // keep retrying so a server that comes back is reconnected, but only log
@@ -874,11 +1089,14 @@ public class IdServer implements ServerInterface {
                     Socket sock = new Socket();
                     sock.connect(new InetSocketAddress(peerHost, serverPort), heartrate / 2);
                     if (verbosity)
-                        System.out.println(COMMANDC + " FOUND: " + peerHost + ":" + serverPort + RESET);
+                        System.out.println(SYSTEMFLAG + " Connected to peer server " + peerHost + ":" + serverPort);
                     return sock;
                 } catch (IOException e) {
-                    if (verbosity && !reported)
-                        System.out.println(ERRORFLAG + " server " + peerHost + ":" + serverPort
+                    if (verbosity && !reported && !everConnected)
+                        System.out.println(SYSTEMFLAG + " Waiting for peer server " + peerHost + ":" + serverPort
+                                + " to start...");
+                    else if (verbosity && !reported)
+                        System.out.println(roleFlag() + ERRORFLAG + " Server " + peerHost + ":" + serverPort
                                 + " not reachable, retrying in the background...");
                     reported = true;
                     Thread.sleep(heartrate / 2);
@@ -892,6 +1110,7 @@ public class IdServer implements ServerInterface {
                 conNum = 0;
                 try {
                     sock = connect();
+                    everConnected = true;
                     // a server that stops sending heartbeats is treated as dead
                     sock.setSoTimeout(heartrate * 3);
                     setConnectionHost(sock.getInetAddress().getHostAddress());
@@ -916,16 +1135,17 @@ public class IdServer implements ServerInterface {
                         toServer.setConNum(conNum);
 
                         // part of the bully algorithm
-                        if (readState == imBoss)
-                            followBoss(conNum, connectionHost);
+                        if (readState == coordinator)
+                            followCoordinator(conNum, connectionHost);
                         else if (readState == election)
                             handleElection(conNum);
                     }
 
                 } catch (IOException e) {
                     if (conNum != 0) {
-                        System.out.println(
-                                ERRORFLAG + " Server " + conNum + " at " + connectionHost + " disconnected");
+                        String lost = conNum == coordinatorPid ? "Coordinator " : "Server ";
+                        System.out.println(roleFlag() + ERRORFLAG + " " + lost + conNum + " at " + connectionHost
+                                + " disconnected");
                         numServers--;
                         connections.remove(connectionHost);
                         handleDisconnect(conNum);
@@ -982,8 +1202,7 @@ public class IdServer implements ServerInterface {
                     oos.flush();
                 }
             } catch (IOException e) {
-                if (verbosity)
-                    System.out.println(ERRORFLAG + " shutting down outputstream for " + conNum);
+                // the connection closed; its ServerListen thread logs the disconnect
             } catch (InterruptedException e) {
                 e.printStackTrace();
             }
@@ -1004,12 +1223,12 @@ public class IdServer implements ServerInterface {
 
             Registry reg = LocateRegistry.getRegistry(port);
             if (verbosity) {
-                System.out.println(SYSTEMFLAG + "Registry " + COMMANDC + "SET\n" + RESET);
+                System.out.println(SYSTEMFLAG + " Found RMI registry on port " + port);
             }
 
             reg.rebind("severus", severus);
             if (verbosity) {
-                System.out.println(SYSTEMFLAG + "Registy Rebind " + COMMANDC + "SET\n" + RESET);
+                System.out.println(SYSTEMFLAG + " Bound \"severus\" in RMI registry, ready for clients");
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -1029,7 +1248,7 @@ public class IdServer implements ServerInterface {
 
             handleServerArgs(args);
             if (verbosity) {
-                System.out.println("\n\n" + SYSTEMFLAG + " Starting IdSever at Host: localhost " + "Port: " + port);
+                System.out.println(SYSTEMFLAG + " Starting IdServer, RMI registry port " + port);
             }
 
             System.setProperty("javax.net.ssl.keyStore", "Server_Keystore");
@@ -1076,11 +1295,11 @@ public class IdServer implements ServerInterface {
                     System.out.println(SYSTEMFLAG + " Setting server port to " + serverCommand.getOptionValue(arg));
                 }
 
-                // Handles the numport option for port specification
+                // Handles the server list file
                 if (serverOption.getOpt().equals("s")) {
                     arg = serverOption.getOpt();
                     serverFile = serverCommand.getOptionValue(arg);
-                    System.out.println(SYSTEMFLAG + " Setting server port to " + serverCommand.getOptionValue(arg));
+                    System.out.println(SYSTEMFLAG + " Server list file: " + serverCommand.getOptionValue(arg));
                 }
 
                 // Handles the verbosity specification

@@ -234,10 +234,10 @@ public class IdClient {
                 }
 
                 switch (state) {
-                    case 0:
+                    case 0: // election
                         System.out.println(ERRORFLAG + "ELECTION IN PROGRESS: TRYING AGAIN LATER." + host);
                         System.exit(0);
-                    case 1:
+                    case 1: // replica: ask it who the coordinator is
                         Inet4Address temp = severus.getCoordinator();
                         if (temp == null) {
                             // brief retry for coordinator resolution
@@ -256,7 +256,7 @@ public class IdClient {
                         System.out.println("Found Coordinator: " + coordAddy);
                         i = serverHostList.size() - 2;
                         break;
-                    case 2:
+                    case 2: // coordinator
                         i = serverHostList.size() - 1;
                 }
 

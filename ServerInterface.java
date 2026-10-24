@@ -54,7 +54,7 @@ public interface ServerInterface extends java.rmi.Remote {
     String getAccounts(String attribute) throws java.rmi.RemoteException;
 
     /**
-     * Getter for the server state [election || subordinate || coordinator]
+     * Getter for the server state [election (0) || replica (1) || coordinator (2)]
      * @return state
      */
     int getState() throws java.rmi.RemoteException;
