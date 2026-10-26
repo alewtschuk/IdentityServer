@@ -28,6 +28,9 @@ WORKDIR /app
 
 COPY . .
 
+# TLS keystores for RMI over SSL, generated per image so no private key is committed
+RUN ./gen-certs.sh
+
 RUN make
 
 # No CMD here

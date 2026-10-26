@@ -29,7 +29,7 @@ public interface ServerInterface extends java.rmi.Remote {
     String lookupUUID(String uuid, String recentIp) throws java.rmi.RemoteException;
 
     /**
-     * Modifies the username, checks passord if needed
+     * Modifies the username, checks password if needed
      * @param oldName
      * @param newName
      * @param password
@@ -39,7 +39,7 @@ public interface ServerInterface extends java.rmi.Remote {
     String changeUsername(String oldName, String newName, byte[] password, String recentIp) throws java.rmi.RemoteException;
 
     /**
-     * Deletes user, checks if password is the same before delting, fails if no match
+     * Deletes user, checks if password is the same before deleting, fails if no match
      * @param username
      * @param password
      * @return String for client debugging

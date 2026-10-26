@@ -18,7 +18,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.regex.Pattern;
 
 import org.apache.commons.cli.*;
 
@@ -27,21 +26,15 @@ public class IdClient {
     static int port = 5128;
     static String coordAddy = "none";
     static Registry reg;
-    static ServerInterface severus;
+    static ServerInterface server;
     static boolean debug = false;
-    final static String IP_PATTERN = "^(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)\\." +
-                                     "(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)\\." +
-                                     "(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)\\." +
-                                     "(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)$";
 
     final static String RESET = "\u001B[0m";
-    final static String ANSI_BLACK = "\u001B[30m";
     final static String ERRORC = "\u001B[31m";
     final static String INFOC = "\u001B[32m";
     final static String DEBUGC = "\u001B[33m";
     final static String ANSI_PURPLE = "\u001B[35m";
     final static String ACCOUNTC = "\u001B[36m";
-    final static String ANSI_WHITE = "\u001B[37m";
     final static String DEBUGFLAG = "[" + DEBUGC + "DEBUG" + RESET + "] ";
     final static String ERRORFLAG = "[" + ERRORC + "ERROR" + RESET + "] ";
     final static String INFOFLAG = "[" + INFOC + "INFO" + RESET + "]";
@@ -70,7 +63,7 @@ public class IdClient {
             //Required arg
             if (command.hasOption("server")) {
                 System.out.println("== CLIENT RUNNING ==");
-                System.out.println("Connecting to IdSever at host: " + host + " Port: " + port + "\n");
+                System.out.println("Connecting to IdServer at host: " + host + " Port: " + port + "\n");
             } 
 
             //Get system IP
@@ -95,15 +88,11 @@ public class IdClient {
         } catch (java.net.UnknownHostException e) {
             if(debug){e.printStackTrace();}
             System.err.println(ERRORC + "[ERROR]: " + RESET + "Client ran into" + ERRORC + " UNKNOWN-HOST" + RESET + " error in main");
-        }catch (Exception e) {
+        } catch (Exception e) {
             if(debug){e.printStackTrace();}
-            if(debug){System.err.println(ERRORC + "[ERROR]: " + RESET + "Client ran into" + ERRORC + " EXCEPTION" + RESET + " error in main");}
-            if(debug){System.err.println(ERRORC + "[ERROR]: " + RESET + "The problem lies in initServerConnection()");}
+            System.err.println(ERRORC + "[ERROR]: " + RESET + "Client failed: " + e + " (run with -dx for details)");
+            System.exit(1);
         }
-        //catch ( Exception e ) {
-        //     if(debug){e.printStackTrace();}
-        //     System.err.println(ERRORC + "[ERROR]: " + RESET + "Client ran into" + ERRORC + " LAST RESORT CATCH " + RESET + " error in main");
-        // }
 
  
     } //end main
@@ -113,7 +102,6 @@ public class IdClient {
      */
     private static void setupSSL() {
         System.setProperty("javax.net.ssl.trustStore", "Client_Truststore");
-        System.setProperty("java.security.policy", "mysecurity.policy");
         System.setProperty("javax.net.ssl.trustStorePassword", "123456");
     }
 
@@ -158,12 +146,12 @@ public class IdClient {
             System.exit(1);
         } else { //No input file specified so the server input functions as in P2
             if (debug) {System.out.println(DEBUGFLAG + "No file input, setting host to " + serverCommandArgument);}
-            if(severus == null){
+            if(server == null){
                 host = serverCommandArgument; // Set the host directly if it's not a file
                 reg = LocateRegistry.getRegistry(host, port);
-                severus = (ServerInterface) reg.lookup("severus");
+                server = (ServerInterface) reg.lookup("IdServer");
             }
-            if (debug && severus != null) {System.out.println(DEBUGFLAG + "Serverus has been set");}
+            if (debug && server != null) {System.out.println(DEBUGFLAG + "Server stub has been set");}
         }
     }
     
@@ -178,9 +166,7 @@ public class IdClient {
             scanner.useDelimiter(",");
             while (scanner.hasNext()) {
                 String next = scanner.next();
-                if (true) { //Pattern.matches(IP_PATTERN, next.trim())) {
-                    serverHostList.add(next);
-                }
+                serverHostList.add(next);
             }
     
             if (serverHostList.isEmpty()) {
@@ -214,23 +200,23 @@ public class IdClient {
                 host = serverHost.trim();
 
                 reg = LocateRegistry.getRegistry(host, port);
-                severus = (ServerInterface) reg.lookup("severus");
+                server = (ServerInterface) reg.lookup("IdServer");
                 String[] boundNames = reg.list();
                 if(debug){System.out.println(DEBUGFLAG + "Bound names: " + String.join(", ", boundNames));}
                 isConnected = true;
-                System.out.println(DEBUGFLAG + "Connected to " + host);
+                if(debug){System.out.println(DEBUGFLAG + "Connected to " + host);}
 
 
-                int state = severus.getState();
-                System.out.println(DEBUGFLAG + "State: " + state);
+                int state = server.getState();
+                if(debug){System.out.println(DEBUGFLAG + "State: " + state);}
 
                 // If election is in progress, wait briefly and recheck a few times
                 if (state == 0) {
                     for (int retry = 0; retry < 10 && state == 0; retry++) {
                         try { Thread.sleep(500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                        state = severus.getState();
+                        state = server.getState();
                     }
-                    System.out.println(DEBUGFLAG + "State after wait: " + state);
+                    if(debug){System.out.println(DEBUGFLAG + "State after wait: " + state);}
                 }
 
                 switch (state) {
@@ -238,12 +224,12 @@ public class IdClient {
                         System.out.println(ERRORFLAG + "ELECTION IN PROGRESS: TRYING AGAIN LATER." + host);
                         System.exit(0);
                     case 1: // replica: ask it who the coordinator is
-                        Inet4Address temp = severus.getCoordinator();
+                        Inet4Address temp = server.getCoordinator();
                         if (temp == null) {
                             // brief retry for coordinator resolution
                             for (int retry = 0; retry < 10 && temp == null; retry++) {
                                 try { Thread.sleep(500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                                temp = severus.getCoordinator();
+                                temp = server.getCoordinator();
                             }
                             if (temp == null) {
                                 System.out.println(ERRORFLAG + "ELECTION IN PROGRESS: TRYING AGAIN LATER." + host);
@@ -271,7 +257,7 @@ public class IdClient {
                     break;
                 }
                 try {
-                    // Exponential backoff
+                    // wait a second before trying the next server
                     Thread.sleep(1000);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
@@ -329,12 +315,12 @@ public class IdClient {
 
                     String createOut;
                     if(password == null){
-                        createOut = severus.createAccount(loginname, realname, null, ipAddress);
+                        createOut = server.createAccount(loginname, realname, null, ipAddress);
                         System.out.print(ACCOUNTC + "[FROM SERVER]: ");
                         System.out.println(createOut);
                         System.out.print(RESET);
                     } else {
-                        createOut = severus.createAccount(loginname, realname, encrypt(password), ipAddress);
+                        createOut = server.createAccount(loginname, realname, encrypt(password), ipAddress);
                         System.out.print(ACCOUNTC + "[FROM SERVER]: ");
                         System.out.println(createOut);
                         System.out.print(RESET);
@@ -344,15 +330,15 @@ public class IdClient {
             
                 case "lookup":
                     System.out.println("Command " + whichArg + " called with value: " + command.getOptionValue("lookup"));
-                    String lookupOut = severus.lookupUser(command.getOptionValue("lookup"), ipAddress);
+                    String lookupOut = server.lookupUser(command.getOptionValue("lookup"), ipAddress);
                     System.out.print(ACCOUNTC + "[FROM SERVER]: ");
                     System.out.println(lookupOut);
                     System.out.print(RESET);
                     break;
 
                 case "reverse-lookup":
-                    System.out.println("Command " + whichArg + " called with value: " + command.getOptionValue("reverse"));
-                    String revLookupOut = severus.lookupUUID(command.getOptionValue("reverse-lookup"), ipAddress);
+                    System.out.println("Command " + whichArg + " called with value: " + command.getOptionValue("reverse-lookup"));
+                    String revLookupOut = server.lookupUUID(command.getOptionValue("reverse-lookup"), ipAddress);
                     System.out.print(ACCOUNTC + "[FROM SERVER]: Account info found: ");
                     System.out.println(revLookupOut);
                     System.out.print(RESET);
@@ -376,7 +362,7 @@ public class IdClient {
                     if (password != null && !password.isEmpty()) {
                         System.out.println("Password: " + password);
                     }
-                    String modifyOut = severus.changeUsername(oldname, newname, encrypt(password), ipAddress);
+                    String modifyOut = server.changeUsername(oldname, newname, encrypt(password), ipAddress);
                     System.out.print(ACCOUNTC + "[FROM SERVER]: ");
                     System.out.println(modifyOut);
                     System.out.print(RESET);
@@ -387,7 +373,7 @@ public class IdClient {
 
                     loginname = command.getOptionValue("delete");
                     password = command.getOptionValue("password");
-                    String deleteOut = severus.deleteAccount((loginname), encrypt(password));
+                    String deleteOut = server.deleteAccount((loginname), encrypt(password));
                     System.out.print(ACCOUNTC + "[FROM SERVER]: ");
                     System.out.println(deleteOut);
                     System.out.print(RESET);
@@ -397,7 +383,7 @@ public class IdClient {
                     System.out.println("Command " + whichArg + " called with value: " + command.getOptionValue("get"));
 
                     String getOpt = command.getOptionValue("get");
-                    String getOut = severus.getAccounts(getOpt);
+                    String getOut = server.getAccounts(getOpt);
                     System.out.print(ACCOUNTC + "[FROM SERVER]: ");
                     System.out.print(getOut);
                     System.out.print(RESET);

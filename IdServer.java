@@ -1,5 +1,4 @@
 import java.util.UUID;
-import java.util.regex.Pattern;
 
 import javax.rmi.ssl.SslRMIClientSocketFactory;
 import javax.rmi.ssl.SslRMIServerSocketFactory;
@@ -26,7 +25,7 @@ import java.rmi.server.UnicastRemoteObject;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.regex.Pattern;
 import java.util.Map;
 import java.util.Set;
 import java.util.Timer;
@@ -40,10 +39,10 @@ import redis.clients.jedis.*;
 public class IdServer implements ServerInterface {
 
     // internal server variables
-    // private HashSet<IdAccount> accounts; CAN MAKE THIS A CACHE IN THE FUTURE
     private static boolean verbosity = false;
     static int port = 5128;
     static int redisPort = 6379;
+    static final String RMI_NAME = "IdServer"; // name the server is bound under in the RMI registry
     JedisPool pool = new JedisPool("localhost", redisPort);
 
     // server coordination variables
@@ -62,14 +61,12 @@ public class IdServer implements ServerInterface {
     private ArrayList<ServerListen> serverListeners = new ArrayList<ServerListen>();
 
     private int heartrate = 2000;
-    private int numServers = 0;
     private int serverPort = 5126;
 
     private ServerSocket servSock;
     private volatile Inet4Address coordinatorAddy;
     private String myAddress;
     private String myHostName;
-    private HashSet<String> connections; // for debugging
 
     // writes the coordinator is waiting to see on every replica (eventual consistency)
     private final ConcurrentLinkedQueue<PendingWrite> pendingWrites = new ConcurrentLinkedQueue<PendingWrite>();
@@ -80,14 +77,12 @@ public class IdServer implements ServerInterface {
     private final int coordinator = 2;
 
     final static String RESET = "\u001B[0m";
-    final static String ANSI_BLACK = "\u001B[30m";
     final static String ERRORC = "\u001B[31m";
     final static String COMMANDC = "\u001B[32m";
     final static String REPLICAC = "\u001B[33m";
     final static String ELECTIONC = "\u001B[34m";
     final static String COORDINATORC = "\u001B[35m";
     final static String ACCOUNTC = "\u001B[36m";
-    final static String ANSI_WHITE = "\u001B[37m";
     final static String CLIENTC = "\u001B[1;37m"; // bold white
 
     // Log flags: [SYSTEM] generic server work, [ELECTION] bully algorithm,
@@ -97,10 +92,6 @@ public class IdServer implements ServerInterface {
     final static String COORDINATORFLAG = "[" + COORDINATORC + "COORDINATOR" + RESET + "]";
     final static String REPLICAFLAG = "[" + REPLICAC + "REPLICA" + RESET + "]";
     final static String ERRORFLAG = "[" + ERRORC + "ERROR" + RESET + "]";
-    final static String IP_PATTERN = "^(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)\\." +
-            "(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)\\." +
-            "(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)\\." +
-            "(25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)$";
 
     /**
      * CONSTRUCTOR
@@ -115,8 +106,6 @@ public class IdServer implements ServerInterface {
         try (Jedis jedis = pool.getResource()) {
             jedis.configSet("protected-mode", "no");
         }
-        // we can uncomment this if we want to implement a cache or something
-        // this.accounts = new HashSet<IdAccount>();
         Runtime.getRuntime().addShutdownHook(new DeathToServer());
         System.out.println(SYSTEMFLAG + " Server established with \"PID\": " + serverNum);
 
@@ -126,7 +115,6 @@ public class IdServer implements ServerInterface {
         this.coordinatorPid = 0;
 
         // handling all listening and sending threads
-        this.connections = new HashSet<String>();
         this.servSock = new ServerSocket(serverPort);
         this.myAddress = InetAddress.getLocalHost().getHostAddress();
         this.myHostName = InetAddress.getLocalHost().getHostName();
@@ -135,7 +123,7 @@ public class IdServer implements ServerInterface {
         setupServerConnections();
         new ReplicationListener().start();
 
-        // taking inspiration from hw2, this lock is used for the heartbeat and delays
+        // this lock is used for the heartbeat and delays
         // all ObjectOutputStream writes. Each heartbeat also advances the election.
         Timer timer = new Timer();
         TimerTask tt = new TimerTask() {
@@ -330,9 +318,7 @@ public class IdServer implements ServerInterface {
             scanner.useDelimiter(",");
             while (scanner.hasNext()) {
                 String next = scanner.next();
-                if (true) { // Pattern.matches(IP_PATTERN, next.trim())) {
-                    serverHosts.add(next.trim());
-                }
+                serverHosts.add(next.trim());
             }
 
             if (serverHosts.isEmpty()) {
@@ -404,7 +390,7 @@ public class IdServer implements ServerInterface {
                 }
                 if (caughtUp == replicas) {
                     System.out.println(COORDINATORFLAG + " " + write.description + " replicated to " + caughtUp
-                            + "/" + replicas + " replicas, eventual consistency reached");
+                            + "/" + replicas + " replicas");
                 } else if (System.currentTimeMillis() - write.writtenAt > heartrate * 5) {
                     System.out.println(COORDINATORFLAG + ERRORFLAG + " " + write.description + " reached only " + caughtUp + "/"
                             + replicas + " replicas so far, no longer tracking it");
@@ -569,14 +555,14 @@ public class IdServer implements ServerInterface {
     private IdAccount readAccount(String username) {
         if (verbosity)
             System.out.println(COORDINATORFLAG + " Reading account \"" + username + "\" from redis");
-        IdAccount skeeyyah;
+        IdAccount account;
         synchronized (this) {
             try (Jedis jedis = pool.getResource()) {
                 if (!jedis.exists(username))
                     return null;
 
                 Map<String, String> accMap = jedis.hgetAll(username);
-                skeeyyah = new IdAccount(
+                account = new IdAccount(
                         accMap.get("username"),
                         accMap.get("realName"),
                         UUID.fromString(accMap.get("uuid")),
@@ -586,16 +572,16 @@ public class IdServer implements ServerInterface {
                         accMap.get("original ip"),
                         accMap.get("recent ip"));
 
-                // This line is so hard to read -- if the password is not null, then get the its
-                // bytes from jedis
-                if (!(new String(jedis.get((skeeyyah.getUuid().toString() + "p").getBytes())).equals("null")))
-                    skeeyyah.setPassword(jedis.get((skeeyyah.getUuid().toString() + "p").getBytes()));
+                // the password hash is stored separately under "<uuid>p"; "null" means no password
+                byte[] password = jedis.get((account.getUuid() + "p").getBytes());
+                if (password != null && !new String(password).equals("null"))
+                    account.setPassword(password);
             } // end try()
         } // end sync
-        return skeeyyah;
+        return account;
     }
 
-    // checks redis for entry of accoutn with uuid
+    // checks redis for entry of account with uuid
     /**
      * This method account reaches into this server's redis database and searches
      * for an account with specified UUID.
@@ -608,14 +594,14 @@ public class IdServer implements ServerInterface {
             System.out.println(COORDINATORFLAG + " Reading account \"" + uuid + "\" from redis");
 
         String uuidString = uuid.toString();
-        IdAccount skeeyyah;
+        IdAccount account;
         synchronized (this) {
             try (Jedis jedis = pool.getResource()) {
                 if (!jedis.exists(uuidString))
                     return null;
 
                 Map<String, String> accMap = jedis.hgetAll(uuidString);
-                skeeyyah = new IdAccount(
+                account = new IdAccount(
                         accMap.get("username"),
                         accMap.get("realName"),
                         UUID.fromString(accMap.get("uuid")),
@@ -625,13 +611,13 @@ public class IdServer implements ServerInterface {
                         accMap.get("original ip"),
                         accMap.get("recent ip"));
 
-                // This line is so hard to read -- if the password is not null, then get the its
-                // bytes from jedis
-                if (!(new String(jedis.get((skeeyyah.getUuid().toString() + "p").getBytes())).equals("null")))
-                    skeeyyah.setPassword(jedis.get((uuidString + "p").getBytes()));
+                // the password hash is stored separately under "<uuid>p"; "null" means no password
+                byte[] password = jedis.get((account.getUuid() + "p").getBytes());
+                if (password != null && !new String(password).equals("null"))
+                    account.setPassword(password);
             } // end try()
         } // end sync
-        return skeeyyah;
+        return account;
     }
 
     /**
@@ -658,7 +644,7 @@ public class IdServer implements ServerInterface {
     }
 
     /**
-     * This method is called by the modify() method to delete the enture account
+     * This method is called by the modify() method to delete the entire account
      * under a specific username key.
      * Note that the modify method will rewrite the account under a new username
      * key.
@@ -705,13 +691,9 @@ public class IdServer implements ServerInterface {
         if (p1.length != p2.length) {
             return false;
         }
-        ;
-        // for(int i = 0; i < p1.length; i++) if(p1[i] != p2[i])
-        // System.out.println("actual password: " + p1[i] + "\n given password: " +
-        // p2[i]); //Debug line
         for (int i = 0; i < p1.length; i++)
             if (p1[i] != p2[i])
-                return false; // Java is cool too
+                return false;
         return true;
     }
 
@@ -770,7 +752,6 @@ public class IdServer implements ServerInterface {
         newAcc.setDateModified(java.time.LocalDateTime.now());
         newAcc.setRecentIp(ipAddress);
 
-        // accounts.add(newAcc);
         writeAccount(newAcc);
         trackReplication("Create of \"" + username + "\"");
         return ACCOUNTC + "Account " + username + " created on server." + RESET;
@@ -835,7 +816,7 @@ public class IdServer implements ServerInterface {
     }
 
     /**
-     * Modifies the username, checks passord if needed
+     * Modifies the username, checks password if needed
      * 
      * @param oldName
      * @param newName
@@ -902,7 +883,7 @@ public class IdServer implements ServerInterface {
     }
 
     /**
-     * Deletes user, checks if password is the same before delting, fails if no
+     * Deletes user, checks if password is the same before deleting, fails if no
      * match
      * 
      * @param username
@@ -922,12 +903,10 @@ public class IdServer implements ServerInterface {
             if (password == null && acc.getPassword() != null) {
                 return ERRORC + "[ERROR] PASSWORD ASSOCIATED WITH ACCOUNT WAS NOT ENTERED" + RESET;
             } else if (acc.getPassword() == null) {
-                // accounts.remove(acc);
                 deleteAccount(username);
                 trackReplication("Delete of \"" + username + "\"");
                 return ACCOUNTC + "Account \"" + username + "\" removed." + RESET;
             } else if (checkPassword(acc.getPassword(), password)) {
-                // accounts.remove(acc);
                 deleteAccount(username);
                 trackReplication("Delete of \"" + username + "\"");
                 return ACCOUNTC + "Account \"" + username + "\" removed." + RESET;
@@ -1021,7 +1000,7 @@ public class IdServer implements ServerInterface {
         public void deathToRMI() {
             try {
                 Registry rg = LocateRegistry.getRegistry(port);
-                rg.unbind("severus");
+                rg.unbind(RMI_NAME);
             } catch (RemoteException e) {
                 System.out.println(
                         ERRORFLAG + "Error in deathToRMI(). Rmi failed to unbind due to RemoteException" + RESET);
@@ -1127,10 +1106,6 @@ public class IdServer implements ServerInterface {
                     while (true) {
                         int[] read = ((int[]) in.readObject());
                         int readState = read[0];
-                        if (conNum == 0) {
-                            numServers++;
-                            connections.add(connectionHost);
-                        }
                         conNum = read[1];
                         toServer.setConNum(conNum);
 
@@ -1146,8 +1121,6 @@ public class IdServer implements ServerInterface {
                         String lost = conNum == coordinatorPid ? "Coordinator " : "Server ";
                         System.out.println(roleFlag() + ERRORFLAG + " " + lost + conNum + " at " + connectionHost
                                 + " disconnected");
-                        numServers--;
-                        connections.remove(connectionHost);
                         handleDisconnect(conNum);
                     }
                 } catch (ClassNotFoundException e) {
@@ -1192,7 +1165,7 @@ public class IdServer implements ServerInterface {
 
         public void run() {
             try {
-                // shuold be every heartbeat
+                // should be every heartbeat
                 while (true) {
                     synchronized (lock) {
                         lock.wait();
@@ -1210,15 +1183,14 @@ public class IdServer implements ServerInterface {
     }
 
     /**
-     * Basically runs the server. It's outside of the main method because we need to
-     * call nonstatic methods (I think?)
-     * Sets bind of the registry
+     * Exports this server over RMI with SSL and binds it in the RMI registry so
+     * clients can look it up
      */
     public void bind() {
         try {
             RMIClientSocketFactory rmiClientSocketFactory = new SslRMIClientSocketFactory();
             RMIServerSocketFactory rmiServerSocketFactory = new SslRMIServerSocketFactory();
-            ServerInterface severus = (ServerInterface) UnicastRemoteObject.exportObject(this, 0,
+            ServerInterface stub = (ServerInterface) UnicastRemoteObject.exportObject(this, 0,
                     rmiClientSocketFactory, rmiServerSocketFactory);
 
             Registry reg = LocateRegistry.getRegistry(port);
@@ -1226,9 +1198,9 @@ public class IdServer implements ServerInterface {
                 System.out.println(SYSTEMFLAG + " Found RMI registry on port " + port);
             }
 
-            reg.rebind("severus", severus);
+            reg.rebind(RMI_NAME, stub);
             if (verbosity) {
-                System.out.println(SYSTEMFLAG + " Bound \"severus\" in RMI registry, ready for clients");
+                System.out.println(SYSTEMFLAG + " Bound \"" + RMI_NAME + "\" in RMI registry, ready for clients");
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -1253,11 +1225,6 @@ public class IdServer implements ServerInterface {
 
             System.setProperty("javax.net.ssl.keyStore", "Server_Keystore");
             System.setProperty("javax.net.ssl.keyStorePassword", "123456");
-            System.setProperty("java.security.policy", "rmisslex2/resources/mysecurity.policy");
-
-            // SSLServerSocketFactory sslSrvFact = (SSLServerSocketFactory)
-            // SSLServerSocketFactory.getDefault();
-            // SSLServerSocket ss = (SSLServerSocket) sslSrvFact.createServerSocket(port);
 
             IdServer server = new IdServer(serverFile);
             server.bind();
@@ -1280,7 +1247,7 @@ public class IdServer implements ServerInterface {
 
             serverOptions.addOption(new Option("s", "serverHosts", true, "Server addresses"));
             serverOptions.addOption(new Option("n", "numport", true, "Server port #"));
-            serverOptions.addOption(new Option("v", "verbose", false, "Sets vebosity of server"));
+            serverOptions.addOption(new Option("v", "verbose", false, "Sets verbosity of server"));
 
             CommandLineParser serverParser = new DefaultParser();
             CommandLine serverCommand = serverParser.parse(serverOptions, args);
@@ -1314,5 +1281,3 @@ public class IdServer implements ServerInterface {
     }
 
 }
-
-// hello

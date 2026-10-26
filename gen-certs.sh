@@ -3,16 +3,20 @@
 #   Server_Keystore   - the servers' private key and certificate
 #   server.cer        - that certificate on its own
 #   Client_Truststore - the certificate the client trusts
-# The certificate names every server hostname (subject alternative names), so
-# the client's hostname check passes whichever server it connects to.
+# The certificate names every server hostname in docker.server (subject
+# alternative names), so the client's hostname check passes whichever server
+# it connects to.
 #
-# Run it inside the JDK image so no local Java install is needed:
-#   docker run --rm -v "$PWD":/src -w /src eclipse-temurin:11-jdk-jammy ./gen-certs.sh
+# Runs during the Docker image build (see Dockerfile). Every container uses the
+# same image, so the servers and the client always share the same certificate.
 set -e
 cd "$(dirname "$0")"
 
 PASS=123456 # must match IdServer.main and IdClient.setupSSL
-SAN="dns:id-server-1,dns:id-server-2,dns:id-server-3,dns:localhost"
+SAN="dns:localhost"
+for host in $(tr ',' ' ' < docker.server); do
+    SAN="$SAN,dns:$host"
+done
 
 rm -f Server_Keystore Client_Truststore server.cer
 keytool -genkeypair -alias idserver -keyalg RSA -keysize 3072 -validity 3650 \

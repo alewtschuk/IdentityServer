@@ -1,2 +1,6 @@
 *.pdf
 *.class
+Server_Keystore
+Client_Truststore
+server.cer
+CHANGES.md

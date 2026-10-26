@@ -1,50 +1,31 @@
-services:
-  redis:
-    image: "redis:alpine"
-    networks:
-      - id-net
+x-id-server: &id-server
+  image: identityserver
+  # each server runs its own redis and RMI registry inside its container (run-server.sh)
+  command: ["./run-server.sh", "5128"]
+  networks:
+    - id-net
 
+services:
+  # Servers must match the hostnames listed in docker.server (the TLS certificate is
+  # generated from that file). To add a server, copy a block and add it there too.
   id-server-1:
-    build: .
+    <<: *id-server
     hostname: id-server-1
-    depends_on:
-      - redis
-    command: ["./run-server.sh", "5128"]
-    networks:
-      - id-net
-    ports:
-      - "5128:5128"
-      - "6379:6379" # Expose Redis port
 
   id-server-2:
-    build: .
+    <<: *id-server
     hostname: id-server-2
-    depends_on: 
-      - redis
-    # Use a consistent RMI registry port across all servers
-    command: ["./run-server.sh", "5128"]
-    networks:
-      - id-net
-    # No external port mapping needed for RMI when using the client container
-    # Expose a unique host port if you want host access to this container's Redis
-    ports:
-      - "6380:6379" # Expose Redis port
 
   id-server-3:
-    build: .
+    <<: *id-server
     hostname: id-server-3
-    depends_on:
-      - redis
-    # Use the same RMI registry port as other servers
-    command: ["./run-server.sh", "5128"]
-    networks:
-      - id-net
-    # No external port mapping needed for RMI when using the client container
-    ports:
-      - "6381:6379" # Expose Redis port
 
+  # idle container on the same network, used to run IdClient (docker-compose exec client ...).
+  # It is the only service that builds the image, so every container shares one
+  # image and therefore one TLS certificate.
   client:
     build: .
+    image: identityserver
     depends_on:
       - id-server-1
       - id-server-2

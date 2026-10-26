@@ -1,0 +1,6 @@
+.git
+*.class
+*.pdf
+Server_Keystore
+Client_Truststore
+server.cer

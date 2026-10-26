@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Runs inside the client container:
-#   docker-compose exec client bash run-tests.sh
+#   make test   (or: docker-compose exec client bash run-tests.sh)
 SERVER="docker.server"
 PORT="5128"
 
