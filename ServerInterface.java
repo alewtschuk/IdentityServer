@@ -1,4 +1,3 @@
-import java.net.Inet4Address;
 
 public interface ServerInterface extends java.rmi.Remote {
 
@@ -60,8 +59,8 @@ public interface ServerInterface extends java.rmi.Remote {
     int getState() throws java.rmi.RemoteException;
 
     /**
-     * gets the address of the coordinator, for client use
-     * @return Inet4Address of coordinator
-     */    
-    Inet4Address getCoordinator() throws java.rmi.RemoteException;
+     * gets the hostname of the coordinator, for client use
+     * @return hostname of the coordinator, or null if there is none yet
+     */
+    String getCoordinator() throws java.rmi.RemoteException;
 }
