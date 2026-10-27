@@ -31,10 +31,6 @@ COPY . .
 # TLS keystores for RMI over SSL, generated per image so no private key is committed
 RUN ./gen-certs.sh
 
-# Where IdServer reads its keystore. ENV (unlike export in a RUN step) persists into
-# every container started from this image; compose can override it per server.
-ENV KEYSTORE_PATH=/app/Server_Keystore
-
 RUN make
 
 # No CMD here

@@ -12,6 +12,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -40,7 +41,6 @@ public class IdServer implements ServerInterface {
     // internal server variables
     private static boolean verbosity = false;
     static int port = 5128;
-    static int objPort = 0; // port the RMI object is exported on, 0 lets RMI pick one
     static int redisPort = 6379;
     static final String RMI_NAME = "IdServer"; // name the server is bound under in the RMI registry
     JedisPool pool = new JedisPool("localhost", redisPort);
@@ -64,8 +64,7 @@ public class IdServer implements ServerInterface {
     private int serverPort = 5126;
 
     private ServerSocket servSock;
-    // hostname of the coordinator as listed in the server file, null if unknown
-    private volatile String coordinatorHost;
+    private volatile Inet4Address coordinatorAddy;
     private String myAddress;
     private String myHostName;
 
@@ -208,7 +207,7 @@ public class IdServer implements ServerInterface {
             if (state == election) {
                 if (++electionTicks >= 2)
                     becomeCoord();
-            } else if (state == replica && coordinatorHost == null) {
+            } else if (state == replica && coordinatorAddy == null) {
                 if (++leaderlessTicks >= 4)
                     startElection();
             }
@@ -223,7 +222,7 @@ public class IdServer implements ServerInterface {
             electionTicks = 0;
             deferredTo = 0;
             coordinatorPid = 0;
-            coordinatorHost = null;
+            coordinatorAddy = null;
         }
     }
 
@@ -231,7 +230,11 @@ public class IdServer implements ServerInterface {
         synchronized (electionLock) {
             state = coordinator;
             coordinatorPid = serverNum;
-            coordinatorHost = myHostName;
+            try {
+                coordinatorAddy = (Inet4Address) InetAddress.getByName(myAddress);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
             try (Jedis jedis = pool.getResource()) {
                 jedis.replicaofNoOne();
             }
@@ -247,11 +250,11 @@ public class IdServer implements ServerInterface {
      * subordinates itself, even if its pid is larger (whitepaper). If two servers
      * both claim coordinator, the lower pid steps down.
      */
-    private void followCoordinator(int coordinatorNum, String newCoordinatorHost) {
+    private void followCoordinator(int coordinatorNum, String coordinatorHost) {
         synchronized (electionLock) {
             if (state == coordinator && coordinatorNum < serverNum)
                 return;
-            boolean newCoordinator = coordinatorPid != coordinatorNum || coordinatorHost == null;
+            boolean newCoordinator = coordinatorPid != coordinatorNum || coordinatorAddy == null;
             state = replica;
             leaderlessTicks = 0;
             deferredTo = 0;
@@ -259,10 +262,12 @@ public class IdServer implements ServerInterface {
             if (!newCoordinator)
                 return;
             replicaSynced = false;
-            String host = serverFileHost(newCoordinatorHost);
-            if (host == null)
-                return; // not resolvable yet: retried on the next announcement
-            coordinatorHost = host;
+            try {
+                coordinatorAddy = (Inet4Address) InetAddress.getByName(coordinatorHost);
+            } catch (IOException e) {
+                e.printStackTrace();
+                return;
+            }
             System.out.println(REPLICAFLAG + " Following coordinator " + coordinatorNum + " at " + coordinatorHost);
             try (Jedis jedis = pool.getResource()) {
                 jedis.replicaof(coordinatorHost, redisPort);
@@ -270,34 +275,6 @@ public class IdServer implements ServerInterface {
             if (verbosity)
                 System.out.println(REPLICAFLAG + " Redis is now a replica of " + coordinatorHost + ":" + redisPort);
         }
-    }
-
-    /**
-     * Maps a peer to its name in the server file. A server that accepted a peer's
-     * connection only knows the peer's IP, but clients need the hostname: it is on
-     * the TLS certificate and is how a client outside Docker finds the published port.
-     *
-     * @param host hostname or IP of a peer
-     * @return the matching server file entry, host itself if none matches, or null
-     *         if host cannot be resolved
-     */
-    private String serverFileHost(String host) {
-        String address;
-        try {
-            address = InetAddress.getByName(host).getHostAddress();
-        } catch (IOException e) {
-            e.printStackTrace();
-            return null;
-        }
-        for (String listed : serverHosts) {
-            try {
-                if (listed.equalsIgnoreCase(host) || InetAddress.getByName(listed).getHostAddress().equals(address))
-                    return listed;
-            } catch (IOException e) {
-                // a listed server that is down cannot be resolved, so it is not this one
-            }
-        }
-        return host;
     }
 
     /**
@@ -312,9 +289,9 @@ public class IdServer implements ServerInterface {
                 deferredTo = Math.max(deferredTo, fromNum);
                 if (state == election)
                     state = replica;
-                if (state == replica && coordinatorHost == null)
+                if (state == replica && coordinatorAddy == null)
                     leaderlessTicks = 0; // the higher server is still electing
-            } else if (state == replica && coordinatorHost == null) {
+            } else if (state == replica && coordinatorAddy == null) {
                 startElection();
             }
         }
@@ -422,7 +399,7 @@ public class IdServer implements ServerInterface {
                 }
                 pendingWrites.poll();
             }
-        } else if (state == replica && coordinatorHost != null && !replicaSynced) {
+        } else if (state == replica && coordinatorAddy != null && !replicaSynced) {
             try (Jedis jedis = pool.getResource()) {
                 Map<String, String> info = replicationInfo(jedis);
                 if ("up".equals(info.get("master_link_status")) && "0".equals(info.get("master_sync_in_progress"))) {
@@ -508,7 +485,7 @@ public class IdServer implements ServerInterface {
             return COORDINATORFLAG;
         if (state == election)
             return ELECTIONFLAG;
-        return coordinatorHost == null ? SYSTEMFLAG : REPLICAFLAG; // no coordinator found yet
+        return coordinatorAddy == null ? SYSTEMFLAG : REPLICAFLAG; // no coordinator found yet
     }
 
     /**
@@ -983,17 +960,15 @@ public class IdServer implements ServerInterface {
     }
 
     /**
-     * gets the hostname of the coordinator, for client use. A hostname rather than
-     * an IP so a client outside the Docker network can map it to a published port
-     * and so it matches a name on the TLS certificate
-     *
-     * @return hostname of the coordinator, or null if there is none yet
+     * gets the address of the coordinator, for client use
+     * 
+     * @return Inet4Address of coordinator
      */
-    public String getCoordinator() throws RemoteException {
+    public Inet4Address getCoordinator() throws RemoteException {
         if (verbosity)
             System.out.println(rmiFlag() + " Client redirected to coordinator at "
-                    + (coordinatorHost == null ? "unknown" : coordinatorHost));
-        return coordinatorHost;
+                    + (coordinatorAddy == null ? "unknown" : coordinatorAddy.getHostAddress()));
+        return coordinatorAddy;
     }
 
     /**
@@ -1215,7 +1190,7 @@ public class IdServer implements ServerInterface {
         try {
             RMIClientSocketFactory rmiClientSocketFactory = new SslRMIClientSocketFactory();
             RMIServerSocketFactory rmiServerSocketFactory = new SslRMIServerSocketFactory();
-            ServerInterface stub = (ServerInterface) UnicastRemoteObject.exportObject(this, objPort,
+            ServerInterface stub = (ServerInterface) UnicastRemoteObject.exportObject(this, 0,
                     rmiClientSocketFactory, rmiServerSocketFactory);
 
             Registry reg = LocateRegistry.getRegistry(port);
@@ -1248,15 +1223,7 @@ public class IdServer implements ServerInterface {
                 System.out.println(SYSTEMFLAG + " Starting IdServer, RMI registry port " + port);
             }
 
-            // path to this server's keystore file, Server_Keystore in the working directory if unset
-            String keystorePath = System.getenv("KEYSTORE_PATH");
-            if (keystorePath == null || keystorePath.isEmpty())
-                keystorePath = "Server_Keystore";
-            if (!new java.io.File(keystorePath).isFile()) {
-                System.out.println(ERRORFLAG + " Keystore not found at " + keystorePath + " (set KEYSTORE_PATH)");
-                System.exit(1);
-            }
-            System.setProperty("javax.net.ssl.keyStore", keystorePath);
+            System.setProperty("javax.net.ssl.keyStore", "Server_Keystore");
             System.setProperty("javax.net.ssl.keyStorePassword", "123456");
 
             IdServer server = new IdServer(serverFile);
@@ -1281,7 +1248,6 @@ public class IdServer implements ServerInterface {
             serverOptions.addOption(new Option("s", "serverHosts", true, "Server addresses"));
             serverOptions.addOption(new Option("n", "numport", true, "Server port #"));
             serverOptions.addOption(new Option("v", "verbose", false, "Sets verbosity of server"));
-            serverOptions.addOption(new Option("o", "object-port", true, "Sets a fixed RMI object port for the server"));
 
             CommandLineParser serverParser = new DefaultParser();
             CommandLine serverCommand = serverParser.parse(serverOptions, args);
@@ -1308,17 +1274,7 @@ public class IdServer implements ServerInterface {
                     verbosity = true;
                     System.out.println(SYSTEMFLAG + " Verbosity set to " + COMMANDC + verbosity + RESET);
                 }
-
-                 // Handles the object-port option for RMI port specification
-                if (serverOption.getOpt().equals("o")) {
-                    arg = serverOption.getOpt();
-                    objPort = Integer.parseInt(serverCommand.getOptionValue(arg));
-                    System.out.println(SYSTEMFLAG + " Setting server RMI object port to " + serverCommand.getOptionValue(arg));
-                }
             }
-        } catch (NumberFormatException e) {
-            System.out.println(ERRORFLAG + " Port options (-n, -o) must be numbers: " + e.getMessage());
-            System.exit(1);
         } catch (ParseException e) {
             e.printStackTrace();
         }

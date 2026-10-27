@@ -1,9 +1,6 @@
 import java.io.File;
-import java.io.IOException;
-import java.io.InputStream;
+import java.net.Inet4Address;
 import java.net.InetAddress;
-import java.nio.file.Files;
-import java.nio.file.StandardCopyOption;
 import java.rmi.*;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
@@ -11,7 +8,6 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Scanner;
 import java.util.Timer;
@@ -28,6 +24,7 @@ import org.apache.commons.cli.*;
 public class IdClient {
     static String host = null;
     static int port = 5128;
+    static String coordAddy = "none";
     static Registry reg;
     static ServerInterface server;
     static boolean debug = false;
@@ -42,8 +39,7 @@ public class IdClient {
     final static String ERRORFLAG = "[" + ERRORC + "ERROR" + RESET + "] ";
     final static String INFOFLAG = "[" + INFOC + "INFO" + RESET + "]";
 
-    // servers from the server file in file order, hostname -> RMI registry port
-    static LinkedHashMap<String, Integer> serverHostMap = new LinkedHashMap<>();
+    static List<String> serverHostList = new ArrayList<>(); //List to hold serverHost addresses
 
     public static void main(String[] args) throws UnknownHostException{
 
@@ -102,47 +98,11 @@ public class IdClient {
     } //end main
 
     /**
-     * Points SSL at the client truststore, the certificate the client trusts the
-     * servers with. Checked in order:
-     *   1. the CLIENT_TRUSTSTORE environment variable (a file path)
-     *   2. a truststore bundled inside the client jar as the resource "/Client_Truststore"
-     *   3. Client_Truststore in the working directory (how the client runs in Docker)
+     * Sets up the SSL system properties
      */
     private static void setupSSL() {
-        try {
-            String truststorePath = System.getenv("CLIENT_TRUSTSTORE");
-            if (truststorePath == null || truststorePath.isEmpty()) {
-                truststorePath = extractBundledTruststore();
-            }
-            if (truststorePath == null) {
-                truststorePath = "Client_Truststore";
-            }
-            if (!new File(truststorePath).isFile()) {
-                throw new IllegalStateException("truststore not found at " + truststorePath + " (set CLIENT_TRUSTSTORE)");
-            }
-            if (debug) {System.out.println(DEBUGFLAG + "Using truststore " + truststorePath);}
-            System.setProperty("javax.net.ssl.trustStore", truststorePath);
-            System.setProperty("javax.net.ssl.trustStorePassword", "123456");
-        } catch (Exception e) {
-            if(debug){e.printStackTrace();}
-            System.err.println(ERRORC + "[ERROR]: " + RESET + "Client failed: " + e + " client truststore not loaded");
-            System.exit(1);
-        }
-    }
-
-    /**
-     * Copies the truststore bundled in the client jar to a temp file, because the
-     * javax.net.ssl.trustStore property only accepts a file path
-     * @return the temp file's path, or null if no truststore is bundled
-     */
-    private static String extractBundledTruststore() throws IOException {
-        try (InputStream in = IdClient.class.getResourceAsStream("/Client_Truststore")) {
-            if (in == null) return null;
-            File tempTS = File.createTempFile("Client_Truststore", null);
-            tempTS.deleteOnExit(); // remove file on exit
-            Files.copy(in, tempTS.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            return tempTS.getAbsolutePath();
-        }
+        System.setProperty("javax.net.ssl.trustStore", "Client_Truststore");
+        System.setProperty("javax.net.ssl.trustStorePassword", "123456");
     }
 
     /**
@@ -197,8 +157,7 @@ public class IdClient {
     
     
     /**
-     * Parses the server file into serverHostMap. The file is a comma separated list of
-     * host or host:port entries; a host without a port uses the -n port (default 5128)
+     * Parses the file to pull IP addresses into a List<String>
      * @param serverFilePath
      */
     public static void processServerFile(String serverFilePath) {
@@ -206,49 +165,47 @@ public class IdClient {
         try (Scanner scanner = new Scanner(inputFile)) {
             scanner.useDelimiter(",");
             while (scanner.hasNext()) {
-                String entry = scanner.next().trim();
-                if (entry.isEmpty()) continue;
-                String[] parts = entry.split(":");
-                int entryPort = parts.length > 1 ? Integer.parseInt(parts[1].trim()) : port;
-                serverHostMap.put(parts[0].trim(), entryPort);
+                String next = scanner.next();
+                serverHostList.add(next);
             }
     
-            if (serverHostMap.isEmpty()) {
+            if (serverHostList.isEmpty()) {
                 System.out.println(ERRORFLAG + "No valid server addresses found in file.");
                 System.exit(1);
             }
-            if (debug){System.out.println(DEBUGFLAG + "Addresses in serverHostMap: " + serverHostMap);}
+            if (debug){System.out.println(DEBUGFLAG + "Addresses in serverHostList: " + serverHostList);}
+            connectToServer(); // Attempt to connect to servers from the list
 
         } catch (Exception e) {
             System.out.println(ERRORFLAG + "Problem reading server file: " + e.getMessage());
             System.exit(1);
         }
-        connectToServer(); // Attempt to connect to servers from the list
     }
     
 
     /**
-     * Connects to the coordinator. Servers from the file are tried in order; a replica
-     * is asked for the coordinator's hostname and the next pass connects to it. Exits
-     * if no server can be reached
+     * Attempts server connection with retry mechanism
      */
     public static void connectToServer() {
-        List<String> hosts = new ArrayList<>(serverHostMap.keySet());
-        String coordinator = null; // set once a replica tells us which server is the coordinator
-        int next = 0; // index of the next server from the file to try
-        int failures = 0;
-        int defaultPort = port; // the -n port, for hosts listed without one
-
-        while (failures < hosts.size()) {
-            host = coordinator != null ? coordinator : hosts.get(next);
-            // the coordinator's port comes from the server file; a host not in it uses the -n port
-            port = serverHostMap.getOrDefault(host, defaultPort);
-            if (debug) System.out.println(DEBUGFLAG + "trying this host: " + host + " with port: " + port);
-
+        boolean isConnected = false;
+        int attempts = 0;
+        String serverHost;
+        for(int i = 0; i < serverHostList.size(); i++) {
+            
             try {
+                if(!coordAddy.equals("none")) serverHost = coordAddy;
+                else serverHost = serverHostList.get(i);
+
+                if (debug) System.out.println(DEBUGFLAG + "trying this host: " + serverHost);
+                host = serverHost.trim();
+
                 reg = LocateRegistry.getRegistry(host, port);
                 server = (ServerInterface) reg.lookup("IdServer");
+                String[] boundNames = reg.list();
+                if(debug){System.out.println(DEBUGFLAG + "Bound names: " + String.join(", ", boundNames));}
+                isConnected = true;
                 if(debug){System.out.println(DEBUGFLAG + "Connected to " + host);}
+
 
                 int state = server.getState();
                 if(debug){System.out.println(DEBUGFLAG + "State: " + state);}
@@ -267,39 +224,35 @@ public class IdClient {
                         System.out.println(ERRORFLAG + "ELECTION IN PROGRESS: TRYING AGAIN LATER." + host);
                         System.exit(0);
                     case 1: // replica: ask it who the coordinator is
-                        if (coordinator != null) {
-                            // we were sent here as the coordinator but it is a replica, so leadership moved
-                            System.out.println(ERRORFLAG + "Coordinator changed while connecting: TRYING AGAIN LATER.");
-                            System.exit(0);
+                        Inet4Address temp = server.getCoordinator();
+                        if (temp == null) {
+                            // brief retry for coordinator resolution
+                            for (int retry = 0; retry < 10 && temp == null; retry++) {
+                                try { Thread.sleep(500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                                temp = server.getCoordinator();
+                            }
+                            if (temp == null) {
+                                System.out.println(ERRORFLAG + "ELECTION IN PROGRESS: TRYING AGAIN LATER." + host);
+                                System.exit(0);
+                            }
                         }
-                        coordinator = server.getCoordinator();
-                        // brief retry for coordinator resolution
-                        for (int retry = 0; retry < 10 && coordinator == null; retry++) {
-                            try { Thread.sleep(500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                            coordinator = server.getCoordinator();
-                        }
-                        if (coordinator == null) {
-                            System.out.println(ERRORFLAG + "ELECTION IN PROGRESS: TRYING AGAIN LATER." + host);
-                            System.exit(0);
-                        }
-                        System.out.println("Found Coordinator: " + coordinator);
-                        continue; // next pass of the while loop connects to the coordinator
-                    case 2: // coordinator: connected to the right server
-                        return;
-                    default:
-                        System.out.println(ERRORFLAG + "Server " + host + " reported unknown state " + state);
-                        System.exit(1);
+
+                        coordAddy = temp.toString();
+                        if(coordAddy.startsWith("/")) coordAddy = coordAddy.substring(1);
+                        System.out.println("Found Coordinator: " + coordAddy);
+                        i = serverHostList.size() - 2;
+                        break;
+                    case 2: // coordinator
+                        i = serverHostList.size() - 1;
                 }
+
 
             } catch (RemoteException | NotBoundException e) {
                 Throwable cause = e;
                 while (cause.getCause() != null) cause = cause.getCause();
-                System.out.println(ERRORFLAG + "Failed to connect to " + host + ". Attempt " + (failures + 1)
+                System.out.println(ERRORFLAG + "Failed to connect to " + host + ". Attempt " + (attempts + 1)
                         + " (" + cause.getMessage() + ")");
-                // fall back to the next server in the file
-                coordinator = null;
-                next = (next + 1) % hosts.size();
-                if (++failures == hosts.size()) {
+                if (++attempts == serverHostList.size()) {
                     System.out.println(ERRORFLAG + "All server attempts failed.");
                     break;
                 }
@@ -314,8 +267,10 @@ public class IdClient {
             }
         }
 
-        System.out.println(ERRORFLAG + "No available server found.");
-        System.exit(1);
+        if (!isConnected) {
+            System.out.println(ERRORFLAG + "No available server found.");
+            System.exit(1);
+        }
     }
 
 
@@ -530,5 +485,5 @@ public class IdClient {
             return null;
         }
     }
-
+    
 } //end class
