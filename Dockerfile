@@ -24,6 +24,9 @@ RUN for fp in \
     FD9D5C2DBBD4995AB69B8D50C439D9527B00529199C2FD01B2174EB58F07021F; \
     do grep -qx "$fp" "$JAVA_HOME/lib/security/blocked.certs" || echo "$fp" >> "$JAVA_HOME/lib/security/blocked.certs"; done
 
+# Pre-create the Java user preferences folder for the client
+RUN mkdir -p /root/.java/.userPrefs
+
 WORKDIR /app
 
 COPY . .

@@ -7,17 +7,8 @@ import java.rmi.registry.Registry;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Scanner;
-import java.util.Timer;
-import java.util.TimerTask;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.prefs.Preferences;
 
 import org.apache.commons.cli.*;
@@ -36,11 +27,9 @@ public class IdClient {
     final static String ERRORC = "\u001B[31m";
     final static String INFOC = "\u001B[32m";
     final static String DEBUGC = "\u001B[33m";
-    final static String ANSI_PURPLE = "\u001B[35m";
     final static String ACCOUNTC = "\u001B[36m";
     final static String DEBUGFLAG = "[" + DEBUGC + "DEBUG" + RESET + "] ";
     final static String ERRORFLAG = "[" + ERRORC + "ERROR" + RESET + "] ";
-    final static String INFOFLAG = "[" + INFOC + "INFO" + RESET + "]";
 
     static List<String> serverHostList = new ArrayList<>(); //List to hold serverHost addresses
 
@@ -78,22 +67,22 @@ public class IdClient {
         }
         
         catch (MissingOptionException e){
-            System.err.println(ERRORC + "[ERROR]: " + RESET + "Client missing needed options.");
+            System.err.println(ERRORFLAG + "Client missing needed options.");
             System.err.println(INFOC +"USAGE: " + RESET + "IdClient <-s serverhost> [other commands]");
             System.exit(1);
         } catch (MissingArgumentException e){
-            System.err.println(ERRORC + "[ERROR]: " + RESET + "-s missing needed argument.");
+            System.err.println(ERRORFLAG + "-s missing needed argument.");
             System.err.println(INFOC +"USAGE: " + RESET + "IdClient <-s serverhost> [other commands]");
             System.exit(1);
         } catch (ParseException e) {
             if(debug){e.printStackTrace();}
-            System.err.println(ERRORC + "[ERROR]: " + RESET + "Client ran into" + ERRORC + " PARSING" + RESET + " error in main");
+            System.err.println(ERRORFLAG + "Client ran into" + ERRORC + " PARSING" + RESET + " error in main");
         } catch (java.net.UnknownHostException e) {
             if(debug){e.printStackTrace();}
-            System.err.println(ERRORC + "[ERROR]: " + RESET + "Client ran into" + ERRORC + " UNKNOWN-HOST" + RESET + " error in main");
+            System.err.println(ERRORFLAG + "Client ran into" + ERRORC + " UNKNOWN-HOST" + RESET + " error in main");
         } catch (Exception e) {
             if(debug){e.printStackTrace();}
-            System.err.println(ERRORC + "[ERROR]: " + RESET + "Client failed: " + e + " (run with -dx for details)");
+            System.err.println(ERRORFLAG + "Client failed: " + e + " (run with -dx for details)");
             System.exit(1);
         }
 
@@ -405,17 +394,13 @@ public class IdClient {
                     System.out.print(RESET);
                     break;
 
-                // case "password":
-                //     System.out.println("Command " + whichArg + " called with value: " + command.getOptionValue("password"));
-                //     break;
-
                 default:
                     System.out.println("[DEFAULT]: No arg to be parsed");
                     break;
             }
         } catch (RemoteException e) {
             if(debug){e.printStackTrace();}
-            System.err.println(ERRORC + "[ERROR]: " + RESET + "Client ran into" + ERRORC + " REMOTE-EXCEPTION" + RESET + " error in performAction()");
+            System.err.println(ERRORFLAG + "Client ran into" + ERRORC + " REMOTE-EXCEPTION" + RESET + " error in performAction()");
         }
     }
 
@@ -438,15 +423,6 @@ public class IdClient {
                 if(debug){System.out.println(DEBUGFLAG + "Setting host to " + command.getOptionValue(arg));}
                 host = command.getOptionValue(arg);
             }
-
-            // if((option.getOpt().equals("s") && option.getValue().contains("."))){
-            //     numarg++;
-            //     if(debug){System.out.println(DEBUGFLAG + "Server input is a file: " + command.getOptionValue(arg));}
-            // } else if(option.getOpt().equals("s")){
-            //     arg = option.getLongOpt();
-            //     if(debug){System.out.println(DEBUGFLAG + "Setting host to " + command.getOptionValue(arg));}
-            //     host = command.getOptionValue(arg);
-            // }
 
 
             //If the option is the required s do not pass to switch
