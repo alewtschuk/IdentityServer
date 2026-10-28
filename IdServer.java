@@ -17,8 +17,6 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.nio.file.AccessDeniedException;
-import java.rmi.AccessException;
 import java.rmi.NotBoundException;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
@@ -240,7 +238,7 @@ public class IdServer implements ServerInterface {
                 jedis.replicaofNoOne();
             }
             pendingWrites.clear();
-            System.out.println(COORDINATORFLAG + " COORDINATOR SERVER CHOSEN. Server = " + myHostName + " with PID = " + serverNum);
+            System.out.println(COORDINATORFLAG + " COORDINATOR SERVER CHOSEN with PID = " + serverNum);
             if (verbosity)
                 System.out.println(COORDINATORFLAG + " Coordinator redis is now independent and source of truth");
         }
@@ -255,7 +253,10 @@ public class IdServer implements ServerInterface {
         synchronized (electionLock) {
             if (state == coordinator && coordinatorNum < serverNum)
                 return;
-            boolean newCoordinator = coordinatorPid != coordinatorNum || coordinatorAddr == null;
+            // a coordinator is identified by its pid and its address: after a pid collision two
+            // coordinators can have shared a pid, so a matching pid alone is not enough
+            boolean newCoordinator = coordinatorPid != coordinatorNum || coordinatorAddr == null
+                    || !coordinatorAddr.getHostAddress().equals(coordinatorHost);
             state = replica;
             leaderlessTicks = 0;
             deferredTo = 0;
@@ -285,8 +286,16 @@ public class IdServer implements ServerInterface {
     private void handleElection(int fromNum) {
         synchronized (electionLock) {
             if (fromNum > serverNum) {
-                if (fromNum > deferredTo && verbosity)
-                    System.out.println(ELECTIONFLAG + " Higher pid found, standing down (" + serverNum + " < " + fromNum + ")");
+                if (fromNum > deferredTo && verbosity) {
+                    // only an electing or leaderless server defers; an established coordinator
+                    // or a replica that already has one keeps its role (whitepaper)
+                    if (state == coordinator)
+                        System.out.println(ELECTIONFLAG + " Peer electing with higher pid " + fromNum + ", staying coordinator from prior election (" + serverNum + ")");
+                    else if (state == replica && coordinatorAddr != null)
+                        System.out.println(ELECTIONFLAG + " Higher pid " + fromNum + " seen, still following coordinator " + coordinatorPid);
+                    else
+                        System.out.println(ELECTIONFLAG + " Higher pid found, standing down (" + serverNum + " < " + fromNum + ")");
+                }
                 deferredTo = Math.max(deferredTo, fromNum);
                 if (state == election)
                     state = replica;

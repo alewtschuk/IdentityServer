@@ -8,7 +8,7 @@
 #   make down         stop the cluster and remove its containers (and their data)
 #   make restart      stops any cluster that is running, removes its containers, rebuilds the image, containers, and brings them back up
 #   make m-restart    performs make restart and drops into monitoring immediately after container start
-#   make refresh      performs the same functonality as m-restart but, refreshes the environment by cleaning everything before restarting and monitoring
+#   make refresh      performs the same functionality as m-restart but, refreshes the environment by cleaning everything before restarting and monitoring
 #   make clean        remove compiled classes and stops and removes cluster images
 
 COMPOSE ?= docker compose
@@ -41,7 +41,7 @@ m-restart:
 	@$(MAKE) down && $(MAKE) monitor
 
 refresh:
-	@$(MAKE) clean && $(MAKE) m-restart
+	@$(MAKE) clean && $(MAKE) monitor
 
 clean:
 	@rm -vf *.class 2> /dev/null && $(COMPOSE) down --rmi all --remove-orphans
