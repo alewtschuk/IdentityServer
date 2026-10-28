@@ -58,13 +58,12 @@ public class IdServer implements ServerInterface {
 
     private static String serverFile;
     private static ArrayList<String> serverHosts = new ArrayList<String>();
-    private ArrayList<ServerListen> serverListeners = new ArrayList<ServerListen>();
 
     private int heartrate = 2000;
     private int serverPort = 5126;
 
     private ServerSocket servSock;
-    private volatile Inet4Address coordinatorAddy;
+    private volatile Inet4Address coordinatorAddr;
     private String myAddress;
     private String myHostName;
 
@@ -173,7 +172,6 @@ public class IdServer implements ServerInterface {
             if (i == me)
                 continue;
             ServerListen listener = new ServerListen(serverHosts.get(i), i < me);
-            serverListeners.add(listener);
             listener.start();
         }
     }
@@ -207,7 +205,7 @@ public class IdServer implements ServerInterface {
             if (state == election) {
                 if (++electionTicks >= 2)
                     becomeCoord();
-            } else if (state == replica && coordinatorAddy == null) {
+            } else if (state == replica && coordinatorAddr == null) {
                 if (++leaderlessTicks >= 4)
                     startElection();
             }
@@ -222,7 +220,7 @@ public class IdServer implements ServerInterface {
             electionTicks = 0;
             deferredTo = 0;
             coordinatorPid = 0;
-            coordinatorAddy = null;
+            coordinatorAddr = null;
         }
     }
 
@@ -231,7 +229,7 @@ public class IdServer implements ServerInterface {
             state = coordinator;
             coordinatorPid = serverNum;
             try {
-                coordinatorAddy = (Inet4Address) InetAddress.getByName(myAddress);
+                coordinatorAddr = (Inet4Address) InetAddress.getByName(myAddress);
             } catch (IOException e) {
                 e.printStackTrace();
             }
@@ -254,7 +252,7 @@ public class IdServer implements ServerInterface {
         synchronized (electionLock) {
             if (state == coordinator && coordinatorNum < serverNum)
                 return;
-            boolean newCoordinator = coordinatorPid != coordinatorNum || coordinatorAddy == null;
+            boolean newCoordinator = coordinatorPid != coordinatorNum || coordinatorAddr == null;
             state = replica;
             leaderlessTicks = 0;
             deferredTo = 0;
@@ -263,7 +261,7 @@ public class IdServer implements ServerInterface {
                 return;
             replicaSynced = false;
             try {
-                coordinatorAddy = (Inet4Address) InetAddress.getByName(coordinatorHost);
+                coordinatorAddr = (Inet4Address) InetAddress.getByName(coordinatorHost);
             } catch (IOException e) {
                 e.printStackTrace();
                 return;
@@ -289,9 +287,9 @@ public class IdServer implements ServerInterface {
                 deferredTo = Math.max(deferredTo, fromNum);
                 if (state == election)
                     state = replica;
-                if (state == replica && coordinatorAddy == null)
+                if (state == replica && coordinatorAddr == null)
                     leaderlessTicks = 0; // the higher server is still electing
-            } else if (state == replica && coordinatorAddy == null) {
+            } else if (state == replica && coordinatorAddr == null) {
                 startElection();
             }
         }
@@ -399,7 +397,7 @@ public class IdServer implements ServerInterface {
                 }
                 pendingWrites.poll();
             }
-        } else if (state == replica && coordinatorAddy != null && !replicaSynced) {
+        } else if (state == replica && coordinatorAddr != null && !replicaSynced) {
             try (Jedis jedis = pool.getResource()) {
                 Map<String, String> info = replicationInfo(jedis);
                 if ("up".equals(info.get("master_link_status")) && "0".equals(info.get("master_sync_in_progress"))) {
@@ -485,7 +483,7 @@ public class IdServer implements ServerInterface {
             return COORDINATORFLAG;
         if (state == election)
             return ELECTIONFLAG;
-        return coordinatorAddy == null ? SYSTEMFLAG : REPLICAFLAG; // no coordinator found yet
+        return coordinatorAddr == null ? SYSTEMFLAG : REPLICAFLAG; // no coordinator found yet
     }
 
     /**
@@ -546,7 +544,7 @@ public class IdServer implements ServerInterface {
 
     // searches redis for entry of account by username
     /**
-     * This method account reaches into this server's redis database and searches
+     * This method reaches into this server's redis database and searches
      * for an account with specified username.
      * This method should only be called by the coordinator.
      * 
@@ -583,7 +581,7 @@ public class IdServer implements ServerInterface {
 
     // checks redis for entry of account with uuid
     /**
-     * This method account reaches into this server's redis database and searches
+     * This method reaches into this server's redis database and searches
      * for an account with specified UUID.
      * This method should only be called by the coordinator.
      * 
@@ -662,8 +660,8 @@ public class IdServer implements ServerInterface {
     }
 
     /**
-     * This method is called deleteAccount(username, password) that is called by the
-     * client. It permanently deletes an account and all its information.
+     * This method is called by deleteAccount(username, password), which is called by
+     * the client. It permanently deletes an account and all its information.
      * 
      * @param username
      */
@@ -732,7 +730,7 @@ public class IdServer implements ServerInterface {
             if (verbosity) {
                 System.out.println(rmiFlag() + ERRORC + " Account \"" + username + "\" already exists" + RESET);
             }
-            return ERRORC + " Account with name " + ACCOUNTC + username + RESET
+            return ERRORFLAG + ERRORC + " Account with name " + ACCOUNTC + username + ERRORC
                     + " already exists. Please choose another name." + RESET;
         }
 
@@ -781,7 +779,7 @@ public class IdServer implements ServerInterface {
         if (verbosity) {
             System.out.println(rmiFlag() + ERRORC + " Account not found: " + username + RESET);
         }
-        return ERRORC + "[ERROR] user " + username + " not found" + RESET;
+        return ERRORFLAG + ERRORC + " user " + username + " not found" + RESET;
     }
 
     /**
@@ -796,8 +794,7 @@ public class IdServer implements ServerInterface {
             System.out.println(rmiFlag() + " Request to look up UUID \"" + uuid + "\"");
         }
 
-        // the reason I turn this into a UUID and back to a string is because I haven't
-        // checked if it changes
+        // parse to validate the format and normalize case to match the stored key
         UUID temp = UUID.fromString(uuid);
         IdAccount acc = readAccount(temp);
 
@@ -812,7 +809,7 @@ public class IdServer implements ServerInterface {
         if (verbosity) {
             System.out.println(rmiFlag() + ERRORC + " Account not found: " + uuid + RESET);
         }
-        return ERRORC + "[ERROR] user " + uuid + "not found" + RESET;
+        return ERRORFLAG + ERRORC + " user " + uuid + " not found" + RESET;
     }
 
     /**
@@ -835,15 +832,14 @@ public class IdServer implements ServerInterface {
                 System.out.println(rmiFlag() + ERRORC + " Account \"" + newName + "\" already exists" + RESET);
             }
             acc.setDateModified(java.time.LocalDateTime.now());
-            return ERRORC + "[ERROR] Account with name " + newName + " already exists. Please choose another name."
-                    + RESET;
+            return ERRORFLAG + ERRORC + " Account with name " + newName + " already exists. Please choose another name." + RESET;
         }
 
         acc = readAccount(oldName);
         if (acc == null) {
             if (verbosity)
                 System.out.println(rmiFlag() + ERRORC + " Account not found: " + oldName + RESET);
-            return ERRORC + "[ERROR] NO ACCOUNT FOUND OR ACCOUNT NOT CREATED" + RESET;
+            return ERRORFLAG + ERRORC + " NO ACCOUNT FOUND OR ACCOUNT NOT CREATED" + RESET;
         }
         {
             if (verbosity) {
@@ -851,7 +847,7 @@ public class IdServer implements ServerInterface {
                 System.out.println(rmiFlag() + " Stored password hash: " + shortHash(acc.getPassword()));
             }
             if (password == null && acc.getPassword() != null) {
-                return ERRORC + "[ERROR] PASSWORD ASSOCIATED WITH ACCOUNT WAS NOT ENTERED" + RESET;
+                return ERRORFLAG + ERRORC + " PASSWORD ASSOCIATED WITH ACCOUNT WAS NOT ENTERED" + RESET;
             } else if (acc.getPassword() == null) {
                 acc.setDateModified(java.time.LocalDateTime.now());
                 acc.setUsername(newName); // NO PASSWORD
@@ -877,7 +873,7 @@ public class IdServer implements ServerInterface {
                 writeAccount(acc);
                 if (verbosity)
                     System.out.println(rmiFlag() + ERRORC + " Password hash does not match" + RESET);
-                return ERRORC + "[ERROR] PASSWORD DENIED" + RESET;
+                return ERRORFLAG + ERRORC + " PASSWORD DENIED" + RESET;
             }
         }
     }
@@ -901,7 +897,7 @@ public class IdServer implements ServerInterface {
                 System.out.println(rmiFlag() + ACCOUNTC + " Account found: " + username + RESET);
             }
             if (password == null && acc.getPassword() != null) {
-                return ERRORC + "[ERROR] PASSWORD ASSOCIATED WITH ACCOUNT WAS NOT ENTERED" + RESET;
+                return ERRORFLAG + ERRORC + " PASSWORD ASSOCIATED WITH ACCOUNT WAS NOT ENTERED" + RESET;
             } else if (acc.getPassword() == null) {
                 deleteAccount(username);
                 trackReplication("Delete of \"" + username + "\"");
@@ -911,10 +907,10 @@ public class IdServer implements ServerInterface {
                 trackReplication("Delete of \"" + username + "\"");
                 return ACCOUNTC + "Account \"" + username + "\" removed." + RESET;
             } else
-                return ERRORC + "[ERROR] PASSWORD DENIED" + RESET;
+                return ERRORFLAG + ERRORC + " PASSWORD DENIED" + RESET;
         }
 
-        return ERRORC + "[ERROR] NO ACCOUNT FOUND OR ACCOUNT NOT CREATED" + RESET;
+        return ERRORFLAG + ERRORC + " NO ACCOUNT FOUND OR ACCOUNT NOT CREATED" + RESET;
     }
 
     /**
@@ -933,7 +929,7 @@ public class IdServer implements ServerInterface {
 
         ArrayList<IdAccount> allAccounts = getAllAccounts();
         if (allAccounts.size() == 0)
-            return ERRORC + "[ERROR] There are no accounts, yet..." + RESET;
+            return ERRORFLAG + ERRORC + " There are no accounts, yet..." + RESET;
 
         switch (attribute.toLowerCase()) {
             case "users":
@@ -952,7 +948,7 @@ public class IdServer implements ServerInterface {
                     out += ++i + ":   " + acc.toString() + "\n\n";
                 break;
             default:
-                out += ERRORC + "[ERROR] INVALID ARG WITH -get: " + attribute + RESET;
+                out += ERRORFLAG + ERRORC + " INVALID ARG WITH -get: " + attribute + RESET;
                 break;
         }
 
@@ -967,18 +963,8 @@ public class IdServer implements ServerInterface {
     public Inet4Address getCoordinator() throws RemoteException {
         if (verbosity)
             System.out.println(rmiFlag() + " Client redirected to coordinator at "
-                    + (coordinatorAddy == null ? "unknown" : coordinatorAddy.getHostAddress()));
-        return coordinatorAddy;
-    }
-
-    /**
-     * Sets verbosity of server
-     * 
-     * @param verbosity
-     */
-    public void setVerbose(boolean verbosity) {
-        verbosity = true;
-        System.out.println(SYSTEMFLAG + " Verbosity set to " + COMMANDC + verbosity + RESET);
+                    + (coordinatorAddr == null ? "unknown" : coordinatorAddr.getHostAddress()));
+        return coordinatorAddr;
     }
 
     /**
@@ -1003,10 +989,10 @@ public class IdServer implements ServerInterface {
                 rg.unbind(RMI_NAME);
             } catch (RemoteException e) {
                 System.out.println(
-                        ERRORFLAG + "Error in deathToRMI(). Rmi failed to unbind due to RemoteException" + RESET);
+                        ERRORFLAG + " Error in deathToRMI(). Rmi failed to unbind due to RemoteException");
             } catch (NotBoundException e) {
                 System.out.println(
-                        ERRORFLAG + "Error in deathToRMI(). Rmi failed to unbind due to NotBoundException" + RESET);
+                        ERRORFLAG + " Error in deathToRMI(). Rmi failed to unbind due to NotBoundException");
             }
         }
     }
@@ -1107,7 +1093,6 @@ public class IdServer implements ServerInterface {
                         int[] read = ((int[]) in.readObject());
                         int readState = read[0];
                         conNum = read[1];
-                        toServer.setConNum(conNum);
 
                         // part of the bully algorithm
                         if (readState == coordinator)
@@ -1124,7 +1109,7 @@ public class IdServer implements ServerInterface {
                         handleDisconnect(conNum);
                     }
                 } catch (ClassNotFoundException e) {
-                    System.out.println(ERRORC + "Object read was not an array of integers" + RESET);
+                    System.out.println(roleFlag() + ERRORFLAG + ERRORC + " Object read was not an array of integers" + RESET);
                     e.printStackTrace();
                 } catch (InterruptedException e) {
                     e.printStackTrace();
@@ -1147,20 +1132,12 @@ public class IdServer implements ServerInterface {
      */
     private class ServerSend extends Thread {
         private ObjectOutputStream oos;
-        private int conNum; // the fake PID for the servers
 
         /**
          * CONSTRUCTOR
          */
         public ServerSend(ObjectOutputStream oos) {
             this.oos = oos;
-        }
-
-        /**
-         * Updates the fake PID of this connection
-         */
-        public void setConNum(int newNum) {
-            this.conNum = newNum;
         }
 
         public void run() {
