@@ -1,0 +1,7 @@
+#!/bin/bash
+# Runs IdClient in the client container against the cluster in docker.server,
+# so client calls don't need the full docker compose exec command.
+# Usage: ./idclient -l myuser   (any IdClient options except -s)
+# The cluster must be running (make up).
+cd "$(dirname "$0")"
+exec ${COMPOSE:-docker compose} exec -T client java -cp '.:lib/*' IdClient -s docker.server "$@"

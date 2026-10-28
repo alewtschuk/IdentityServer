@@ -1200,7 +1200,7 @@ public class IdServer implements ServerInterface {
 
             reg.rebind(RMI_NAME, stub);
             if (verbosity) {
-                System.out.println(SYSTEMFLAG + " Bound \"" + RMI_NAME + "\" in RMI registry, ready for clients");
+                System.out.println(SYSTEMFLAG + " Bound \"" + RMI_NAME + "\" in RMI registry");
             }
         } catch (Exception e) {
             e.printStackTrace();

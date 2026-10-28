@@ -20,7 +20,7 @@ services:
     <<: *id-server
     hostname: id-server-3
 
-  # idle container on the same network, used to run IdClient (docker-compose exec client ...).
+  # idle container on the same network, used to run IdClient (docker compose exec client ...).
   # It is the only service that builds the image, so every container shares one
   # image and therefore one TLS certificate.
   client:
@@ -32,6 +32,7 @@ services:
       - id-server-3
     networks:
       - id-net
+    init: true
     command: tail -f /dev/null
 
 networks:

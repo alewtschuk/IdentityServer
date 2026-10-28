@@ -18,13 +18,16 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.prefs.Preferences;
 
 import org.apache.commons.cli.*;
 
 public class IdClient {
+    static Preferences prefs = Preferences.userNodeForPackage(IdClient.class);
+    private final static String SAVED_COORD_ADDR = "coordinatorAddress";
     static String host = null;
     static int port = 5128;
-    static String coordAddy = "none";
+    static String coordAddr = prefs.get(SAVED_COORD_ADDR, "none");
     static Registry reg;
     static ServerInterface server;
     static boolean debug = false;
@@ -45,7 +48,7 @@ public class IdClient {
 
         try {    
 
-        CommandLine command = settupOptions(args);
+        CommandLine command = setupOptions(args);
         debug = command.hasOption("dx");
         if(debug){System.out.println(DEBUGFLAG + "Setting debug to " + debug);}
 
@@ -106,12 +109,12 @@ public class IdClient {
     }
 
     /**
-     * Adds the cli options and setus up the cliParser
+     * Adds the cli options and sets up the cliParser
      * @param args
      * @return
      * @throws ParseException
      */
-    public static CommandLine settupOptions(String[] args) throws ParseException{
+    public static CommandLine setupOptions(String[] args) throws ParseException{
         //Use Apache Cli to create cli options
         Options options = new Options();
         options.addRequiredOption("s", "server", true, "RMI Server hostname");
@@ -193,7 +196,8 @@ public class IdClient {
         for(int i = 0; i < serverHostList.size(); i++) {
             
             try {
-                if(!coordAddy.equals("none")) serverHost = coordAddy;
+                if (debug) System.out.println(DEBUGFLAG + "coordinator address currently set to: " + coordAddr);
+                if(!coordAddr.equals("none")) serverHost = coordAddr;
                 else serverHost = serverHostList.get(i);
 
                 if (debug) System.out.println(DEBUGFLAG + "trying this host: " + serverHost);
@@ -237,21 +241,33 @@ public class IdClient {
                             }
                         }
 
-                        coordAddy = temp.toString();
-                        if(coordAddy.startsWith("/")) coordAddy = coordAddy.substring(1);
-                        System.out.println("Found Coordinator: " + coordAddy);
+                        coordAddr = temp.toString();
+                        if(coordAddr.startsWith("/")) coordAddr = coordAddr.substring(1);
+                        System.out.println("Found Coordinator Address: " + coordAddr);
                         i = serverHostList.size() - 2;
+                        if (!coordAddr.equals(temp.toString())) {
+                            prefs.put(SAVED_COORD_ADDR, coordAddr);
+                            if (debug) System.out.println(DEBUGFLAG + "coordinator address saved: " + coordAddr);
+                        } else {
+                            break;
+                        }
                         break;
                     case 2: // coordinator
                         i = serverHostList.size() - 1;
                 }
 
 
-            } catch (RemoteException | NotBoundException e) {
+            } catch (Exception e) {
+                // If there is an exception caught make sure the first thing done is to remove the saved coordinator address.
+                if (!coordAddr.equals("none")) {
+                    if (debug) System.out.println(DEBUGFLAG + "coordinator address reset due to connection failure") ;
+                    coordAddr = "none";
+                    prefs.remove(SAVED_COORD_ADDR);
+                }
+
                 Throwable cause = e;
                 while (cause.getCause() != null) cause = cause.getCause();
-                System.out.println(ERRORFLAG + "Failed to connect to " + host + ". Attempt " + (attempts + 1)
-                        + " (" + cause.getMessage() + ")");
+                System.out.println(ERRORFLAG + "Failed to connect to " + host + ". Attempt " + (attempts + 1) + " (" + cause.getMessage() + ")");
                 if (++attempts == serverHostList.size()) {
                     System.out.println(ERRORFLAG + "All server attempts failed.");
                     break;

@@ -7,7 +7,7 @@ public interface ServerInterface extends java.rmi.Remote {
      * @param username
      * @param realname
      * @param password
-     * @param ipAddress
+     * @param originalIP
      * @return String for client debugging
      */
     String createAccount(String username, String realname, byte[] password, String originalIP) throws java.rmi.RemoteException;
@@ -34,7 +34,7 @@ public interface ServerInterface extends java.rmi.Remote {
      * @param newName
      * @param password
      * @param recentIp
-     * @returns String for client debugging
+     * @return String for client debugging
      */
     String changeUsername(String oldName, String newName, byte[] password, String recentIp) throws java.rmi.RemoteException;
 

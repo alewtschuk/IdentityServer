@@ -1,4 +1,3 @@
-import java.net.InetAddress;
 import java.time.LocalDateTime;
 import java.util.UUID;
 
@@ -29,7 +28,7 @@ public class IdAccount {
     /**
      * Secondary constructor for account object
      * @param username account username
-     * @param realname real name associated with the acount, if not specified will be the username of the machine
+     * @param realname real name associated with the account, if not specified will be the username of the machine
      * @param uuid 
      * @param dateCreated date of account creation
      * @param dateModified date of most recent action on account 
@@ -59,7 +58,7 @@ public class IdAccount {
     }
 
     /**
-     * Gets dataCreated
+     * Gets dateCreated
      * @return dateCreated
      */
     public LocalDateTime getDateCreated() {

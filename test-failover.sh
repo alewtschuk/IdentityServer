@@ -1,6 +1,6 @@
 #!/bin/bash
 # Tests the bully election and failover against the running cluster.
-# Desigend to run on the host because it stops and starts server containers.
+# Designed to run on the host because it stops and starts server containers.
 #
 #   1. one coordinator is elected and every other server follows it
 #   2. an account is created through the coordinator
@@ -12,7 +12,7 @@
 # replication master, every replica's redis is a slave of it.
 #
 # Usage: ./test-failover.sh   (or: make failover)
-COMPOSE=${COMPOSE:-docker-compose}
+COMPOSE=${COMPOSE:-docker compose}
 SERVERS=$($COMPOSE ps --services --status running | grep '^id-server-' | sort)
 TEST_USER="failover-test-$$"
 failures=0

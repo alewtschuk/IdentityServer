@@ -1,13 +1,13 @@
 #!/bin/bash
 
 # Runs inside the client container:
-#   make test   (or: docker-compose exec client bash run-tests.sh)
+#   make test   (or: docker compose exec client bash run-tests.sh)
 SERVER="docker.server"
 PORT="5128"
 
 # Test --create
 echo "Testing --create"
-CREATE_OUTPUT=$(java -cp .:lib/* IdClient --server $SERVER --numport $PORT --create AlexL Alex --password password123)
+CREATE_OUTPUT=$(java -cp .:lib/* IdClient --server $SERVER --numport $PORT --create alex Alex --password password123)
 echo "CREATE_OUTPUT"
 echo "Extracted UUID: $CREATE_OUTPUT"
 echo "------------------------------------------"
@@ -41,7 +41,7 @@ sleep 2
 
 # Test --create with name that is already used
 echo "Test --create with name that is already used"
-CREATE_OUTPUT=$(java -cp .:lib/* IdClient --server $SERVER --numport $PORT --create AlexL Alex)
+CREATE_OUTPUT=$(java -cp .:lib/* IdClient --server $SERVER --numport $PORT --create alex Alex)
 echo "$CREATE_OUTPUT"
 echo "------------------------------------------"
 echo
@@ -53,7 +53,7 @@ sleep 2
 
 # Test --lookup
 echo "Testing --lookup"
-java -cp .:lib/* IdClient --server $SERVER --numport $PORT --lookup AlexL
+java -cp .:lib/* IdClient --server $SERVER --numport $PORT --lookup alex
 echo "------------------------------------------"
 echo
 echo
@@ -100,7 +100,7 @@ sleep 2
 
 # Test --modify with password
 echo "Testing --modify with password"
-java -cp .:lib/* IdClient --server $SERVER --numport $PORT --modify AlexL ALEX --password "password123"
+java -cp .:lib/* IdClient --server $SERVER --numport $PORT --modify alex ALEX --password "password123"
 echo "------------------------------------------"
 echo
 echo
@@ -142,6 +142,22 @@ sleep 2
 echo "Testing --delete with password"
 java -cp .:lib/* IdClient --server $SERVER --numport $PORT --delete kai -password pass
 echo "------------------------------------------"
+echo
+echo
+echo
+
+sleep 2
+
+echo "Testing --delete with wrong password"
+java -cp .:lib/* IdClient --server $SERVER --numport $PORT --delete ALEX --password wrong
+echo
+echo
+echo
+
+sleep 2
+
+echo "Testing --delete with correct password"
+java -cp .:lib/* IdClient --server $SERVER --numport $PORT --delete ALEX --password password123
 echo
 echo
 echo
