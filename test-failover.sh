@@ -57,19 +57,23 @@ client() {
 echo "Servers: $(echo $SERVERS)"
 [ $(echo $SERVERS | wc -w) -ge 2 ] || { echo "Start the cluster first: make up"; exit 1; }
 
-echo "1. Initial election"
+echo "1. Check initial election"
 first=$(wait_for_coordinator) && pass "$first is coordinator, all others are replicas" || fail "no single coordinator after 30s"
+echo
 
 echo "2. Create an account"
 client -c "$TEST_USER" -p pw "Failover Test" | grep -q "created on server" && pass "created $TEST_USER" || fail "could not create $TEST_USER"
+echo
 
 echo "3. Stop coordinator $first"
 $COMPOSE stop "$first" > /dev/null 2>&1
 SERVERS=$(echo "$SERVERS" | grep -vx "$first")
 second=$(wait_for_coordinator) && pass "$second elected as new coordinator" || fail "no new coordinator after 30s"
+echo
 
-echo "4. Account survived the failover"
+echo "4. Check if account survived the failover"
 client -l "$TEST_USER" | grep -q "FOR USER: $TEST_USER" && pass "$TEST_USER found on $second" || fail "$TEST_USER lost"
+echo
 
 echo "5. Restart $first"
 $COMPOSE start "$first" > /dev/null 2>&1

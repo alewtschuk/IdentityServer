@@ -1,9 +1,14 @@
 import java.io.File;
+import java.io.IOException;
 import java.net.Inet4Address;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.rmi.*;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
+import java.rmi.server.RMISocketFactory;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -33,6 +38,35 @@ public class IdClient {
 
     static List<String> serverHostList = new ArrayList<>(); //List to hold serverHost addresses
 
+    /**
+     * Helper method to extract and return the type of error that occured as a string.
+     * @param e
+     * @return Returns the simple name of the error
+     */
+    public static String getErrorName(Exception e) {
+        String errorType = e.getClass().getSimpleName();
+        return errorType;
+    }
+
+    /**
+     * Prints every client command and option
+     */
+    public static void printUsage() {
+        System.err.println(INFOC + "USAGE: " + RESET + "IdClient -s <host | file.server> [-n <port>] <command> [-dx]");
+        System.err.println("Commands (one per run):");
+        System.err.println("  -c, --create <loginname> [realname] [-p <password>]  Create an account (real name defaults to the system user)");
+        System.err.println("  -l, --lookup <loginname>                            Show the account with this login name");
+        System.err.println("  -r, --reverse-lookup <uuid>                         Show the account with this UUID");
+        System.err.println("  -m, --modify <oldname> <newname> [-p <password>]    Change an account's login name");
+        System.err.println("  -d, --delete <loginname> [-p <password>]            Delete an account");
+        System.err.println("  -g, --get <users | uuids | all>                     List all login names, all UUIDs, or every account");
+        System.err.println("Options:");
+        System.err.println("  -s, --server <host | file.server>  Server hostname or IP, or a .server file listing the cluster (required)");
+        System.err.println("  -n, --numport <port>               RMI registry port (default 5128)");
+        System.err.println("  -p, --password <password>          Password for create, modify or delete");
+        System.err.println("  -dx, --debug                       Print client debug output");
+    }
+
     public static void main(String[] args) throws UnknownHostException{
 
         try {    
@@ -43,9 +77,17 @@ public class IdClient {
 
 
         setupSSL();
+        setupConnectTimeout();
             
             
-        String whichArg = getArg(command).toLowerCase();
+        String whichArg = getArg(command);
+        // getArg can return a non-command option (server, numport, debug) when no command was given
+        if (whichArg == null || !List.of("create", "lookup", "reverse-lookup", "modify", "delete", "get").contains(whichArg.toLowerCase())) {
+            System.err.println(ERRORFLAG + "No command given.");
+            printUsage();
+            System.exit(1);
+        }
+        whichArg = whichArg.toLowerCase();
 
         initServerConnection(command);
 
@@ -68,18 +110,15 @@ public class IdClient {
         
         catch (MissingOptionException e){
             System.err.println(ERRORFLAG + "Client missing needed options.");
-            System.err.println(INFOC +"USAGE: " + RESET + "IdClient <-s serverhost> [other commands]");
+            printUsage();
             System.exit(1);
         } catch (MissingArgumentException e){
             System.err.println(ERRORFLAG + "-s missing needed argument.");
-            System.err.println(INFOC +"USAGE: " + RESET + "IdClient <-s serverhost> [other commands]");
+            printUsage();
             System.exit(1);
-        } catch (ParseException e) {
+        } catch (ParseException | java.net.UnknownHostException e) {
             if(debug){e.printStackTrace();}
-            System.err.println(ERRORFLAG + "Client ran into" + ERRORC + " PARSING" + RESET + " error in main");
-        } catch (java.net.UnknownHostException e) {
-            if(debug){e.printStackTrace();}
-            System.err.println(ERRORFLAG + "Client ran into" + ERRORC + " UNKNOWN-HOST" + RESET + " error in main");
+            System.err.println(ERRORFLAG + "Client ran into " + ERRORC + getErrorName(e) + RESET + " error in main");
         } catch (Exception e) {
             if(debug){e.printStackTrace();}
             System.err.println(ERRORFLAG + "Client failed: " + e + " (run with -dx for details)");
@@ -95,6 +134,25 @@ public class IdClient {
     private static void setupSSL() {
         System.setProperty("javax.net.ssl.trustStore", "Client_Truststore");
         System.setProperty("javax.net.ssl.trustStorePassword", "123456");
+    }
+
+    /**
+     * Gives RMI registry connections a short connect timeout. Without it, a saved
+     * coordinator address whose server went down can hang for the OS default
+     * TCP timeout before the client moves on to the server list.
+     */
+    private static void setupConnectTimeout() throws IOException {
+        RMISocketFactory.setSocketFactory(new RMISocketFactory() {
+            public Socket createSocket(String host, int port) throws IOException {
+                Socket socket = new Socket();
+                socket.connect(new InetSocketAddress(host, port), 3000);
+                return socket;
+            }
+
+            public ServerSocket createServerSocket(int port) throws IOException {
+                return new ServerSocket(port);
+            }
+        });
     }
 
     /**
@@ -130,20 +188,13 @@ public class IdClient {
     public static void initServerConnection(CommandLine command) throws Exception {
         String serverCommandArgument = command.getOptionValue("server");
     
-        //If the server input contains a . and is a serverfile process the file
-        if (serverCommandArgument.contains(".") && serverCommandArgument.endsWith("server")) {
+        //If the server input is a .server file process the file
+        if (serverCommandArgument.endsWith(".server")) {
             processServerFile(serverCommandArgument);
-        } else if (serverCommandArgument.contains(".") && !serverCommandArgument.endsWith("server")) { //If the server input contains a . and is not a serverfile exit and inform user
-            System.out.println(ERRORFLAG + "File type not recognized. Please use a \".server\" file");
-            System.exit(1);
-        } else { //No input file specified so the server input functions as in P2
+        } else { //Otherwise it is a single hostname or IP, connected to like a one-entry server file
             if (debug) {System.out.println(DEBUGFLAG + "No file input, setting host to " + serverCommandArgument);}
-            if(server == null){
-                host = serverCommandArgument; // Set the host directly if it's not a file
-                reg = LocateRegistry.getRegistry(host, port);
-                server = (ServerInterface) reg.lookup("IdServer");
-            }
-            if (debug && server != null) {System.out.println(DEBUGFLAG + "Server stub has been set");}
+            serverHostList.add(serverCommandArgument);
+            connectToServer();
         }
     }
     
@@ -181,6 +232,7 @@ public class IdClient {
     public static void connectToServer() {
         boolean isConnected = false;
         int attempts = 0;
+        boolean staleRetried = false; // the free retry below is only for an address saved by a previous run
         String serverHost;
         for(int i = 0; i < serverHostList.size(); i++) {
             
@@ -252,6 +304,12 @@ public class IdClient {
                     if (debug) System.out.println(DEBUGFLAG + "coordinator address reset due to connection failure") ;
                     coordAddr = "none";
                     prefs.remove(SAVED_COORD_ADDR);
+                    // a stale saved address is not a failed attempt: retry this slot from the list once
+                    if (!staleRetried) {
+                        staleRetried = true;
+                        i--;
+                        continue;
+                    }
                 }
 
                 Throwable cause = e;
@@ -344,7 +402,8 @@ public class IdClient {
                 case "reverse-lookup":
                     System.out.println("Command " + whichArg + " called with value: " + command.getOptionValue("reverse-lookup"));
                     String revLookupOut = server.lookupUUID(command.getOptionValue("reverse-lookup"), ipAddress);
-                    System.out.print(ACCOUNTC + "[FROM SERVER]: Account info found: ");
+                    System.out.print(ACCOUNTC + "[FROM SERVER]: ");
+                    if (revLookupOut.startsWith("FOR USER:")) System.out.print("Account info found ");
                     System.out.println(revLookupOut);
                     System.out.print(RESET);
                     break;
@@ -400,7 +459,7 @@ public class IdClient {
             }
         } catch (RemoteException e) {
             if(debug){e.printStackTrace();}
-            System.err.println(ERRORFLAG + "Client ran into" + ERRORC + " REMOTE-EXCEPTION" + RESET + " error in performAction()");
+            System.err.println(ERRORFLAG + "Client ran into " + ERRORC + getErrorName(e) + RESET + " error in performAction()");
         }
     }
 

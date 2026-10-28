@@ -8,38 +8,42 @@
 #   make down         stop the cluster and remove its containers (and their data)
 #   make restart      stops any cluster that is running, removes its containers, rebuilds the image, containers, and brings them back up
 #   make m-restart    performs make restart and drops into monitoring immediately after container start
+#   make refresh      performs the same functonality as m-restart but, refreshes the environment by cleaning everything before restarting and monitoring
 #   make clean        remove compiled classes and stops and removes cluster images
 
 COMPOSE ?= docker compose
 
 build:
-	javac -cp ".:lib/*" *.java
+	@javac -cp ".:lib/*" *.java
 
 up:
-	$(COMPOSE) up --build -d
+	@$(COMPOSE) up --build -d
 
 logs:
-	$(COMPOSE) logs -f
+	@$(COMPOSE) logs -f
 
 monitor:
-	$(MAKE) up && $(MAKE) logs
+	@$(MAKE) up && $(MAKE) logs
 
 test:
-	$(COMPOSE) exec client bash run-tests.sh
+	@$(COMPOSE) exec client bash run-tests.sh
 
 failover:
-	./test-failover.sh
+	@./test-failover.sh
 
 down:
-	$(COMPOSE) down
+	@$(COMPOSE) down
 
 restart:
-	$(MAKE) down && $(MAKE) up
+	@$(MAKE) down && $(MAKE) up
 
 m-restart:
-	$(MAKE) down && $(MAKE) monitor
+	@$(MAKE) down && $(MAKE) monitor
+
+refresh:
+	@$(MAKE) clean && $(MAKE) m-restart
 
 clean:
-	rm -f *.class && $(COMPOSE) down --rmi all --remove-orphans
+	@rm -vf *.class 2> /dev/null && $(COMPOSE) down --rmi all --remove-orphans
 
-.PHONY: build up logs monitor test failover down restart m-restart clean
+.PHONY: build up logs monitor test failover down restart m-restart refresh clean

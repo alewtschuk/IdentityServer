@@ -184,6 +184,10 @@ Restart the server cluster and drop into monitoring immediately upon start:
 ```bash
 make m-restart
 ```
+Fully refresh the cluster from a clean slate, rebuild the image, and drop into monitoring:
+```bash
+make refresh
+```
 Clean the project removing any compiled classes, taking down the server cluster, and removing the image:
 ```bash
 make clean

@@ -3,7 +3,8 @@ FROM eclipse-temurin:11-jdk-jammy
 # Install make, redis-tools, and redis-server
 RUN apt-get update && apt-get install -y make redis-tools redis-server
 
-# Distrust the compromised eMudhra intermediates (CVE-2026-111943) until Temurin ships the fix.
+# Distrust the compromised eMudhra intermediates (CVE-2026-91403, CVE-2026-114820) until
+# Temurin 11 ships the fix. https://openjdk.org/groups/vulnerability/advisories/2026-10-21
 # SHA-256 fingerprints from https://emudhra.we-have-a-problem.com/impacted-intermediates.json
 RUN for fp in \
     0164D7CEAE5BB909C272AF151FF44B1177AE9B47D9424B94F1D9558C30934D19 \
@@ -26,6 +27,18 @@ RUN for fp in \
 
 # Pre-create the Java user preferences folder for the client
 RUN mkdir -p /root/.java/.userPrefs
+
+# OpenJDK's interim guidance (https://openjdk.org/emudhra): remove the roots that chain to
+# the compromised intermediates, which also covers re-encoded copies blocked.certs misses.
+# OpenJDK lists emSign Root CA - G1/G2, emSign ECC Root CA - G3 and Comodo AAA; Temurin 11
+# only ships G1 and ECC G3, under subject-based aliases. Each root is looked up by name and
+# skipped if a newer base image no longer has it, so the build never fails on this step.
+RUN for root in emsign_root_ca_-_g1 emsign_ecc_root_ca_-_g3; do \
+      alias=$(keytool -list -cacerts -storepass changeit 2>/dev/null | sed -n "s/^\(cn=$root,[^ ]*\), .*/\1/p"); \
+      if [ -z "$alias" ]; then echo "Root $root not in cacerts, nothing to remove"; \
+      else keytool -delete -cacerts -storepass changeit -alias "$alias" && echo "Removed root $alias" \
+        || echo "Could not remove root $alias"; fi; \
+    done
 
 WORKDIR /app
 

@@ -9,6 +9,20 @@ pass=0
 fail=0
 # check <test name> <output> <expected text>: records PASS if the output contains the expected text
 check() { if echo "$2" | grep -q "$3"; then echo "PASS: $1"; pass=$((pass+1)); else echo "FAIL: $1"; fail=$((fail+1)); fi; }
+# check_not <test name> <output> <unexpected text>: records PASS if the output does not contain the text
+check_not() { if echo "$2" | grep -q "$3"; then echo "FAIL: $1"; fail=$((fail+1)); else echo "PASS: $1"; pass=$((pass+1)); fi; }
+
+# Test no command
+echo "Testing no command"
+OUTPUT=$(java -cp .:lib/* IdClient --server $SERVER --numport $PORT 2>&1)
+echo "$OUTPUT"
+check "no command prints usage" "$OUTPUT" "USAGE:"
+echo "------------------------------------------"
+echo
+echo
+echo
+
+sleep 2
 
 # Test --create
 echo "Testing --create"
@@ -109,11 +123,66 @@ echo
 
 sleep 2
 
+# Test --get with an invalid value
+echo "Testing --get with an invalid value"
+OUTPUT=$(java -cp .:lib/* IdClient --server $SERVER --numport $PORT --get bogus)
+echo "$OUTPUT"
+check "--get bogus" "$OUTPUT" "INVALID ARG WITH -get: bogus"
+check_not "--get bogus has no null prefix" "$OUTPUT" "null"
+echo "------------------------------------------"
+echo
+echo
+echo
+
+sleep 2
+
 # Test --reverse-lookup with the extracted UUID
 echo "Testing --reverse-lookup with extracted UUID"
 OUTPUT=$(java -cp .:lib/* IdClient --server $SERVER --numport $PORT --reverse-lookup $UUID)
 echo "$OUTPUT"
 check "--reverse-lookup" "$OUTPUT" "FOR USER: alex"
+echo "------------------------------------------"
+echo
+echo
+echo
+
+sleep 2
+
+# Test --reverse-lookup with a malformed UUID
+echo "Testing --reverse-lookup with a malformed UUID"
+OUTPUT=$(java -cp .:lib/* IdClient --server $SERVER --numport $PORT --reverse-lookup abc)
+echo "$OUTPUT"
+check "--reverse-lookup malformed UUID" "$OUTPUT" "invalid UUID: abc"
+echo "------------------------------------------"
+echo
+echo
+echo
+
+sleep 2
+
+# Test --reverse-lookup with an unknown UUID
+echo "Testing --reverse-lookup with an unknown UUID"
+OUTPUT=$(java -cp .:lib/* IdClient --server $SERVER --numport $PORT --reverse-lookup 00000000-0000-0000-0000-000000000000)
+echo "$OUTPUT"
+check "--reverse-lookup unknown UUID" "$OUTPUT" "not found"
+check_not "--reverse-lookup unknown UUID is not labeled as found" "$OUTPUT" "Account info found"
+echo "------------------------------------------"
+echo
+echo
+echo
+
+sleep 2
+
+# Test --modify with wrong password (the account must not be rewritten)
+echo "Testing --modify with wrong password"
+BEFORE=$(java -cp .:lib/* IdClient --server $SERVER --numport $PORT --lookup alex | grep "Recent Activity")
+OUTPUT=$(java -cp .:lib/* IdClient --server $SERVER --numport $PORT --modify alex ALEX --password wrong)
+echo "$OUTPUT"
+check "--modify with wrong password" "$OUTPUT" "PASSWORD DENIED"
+AFTER=$(java -cp .:lib/* IdClient --server $SERVER --numport $PORT --lookup alex | grep "Recent Activity")
+echo "Before: $BEFORE"
+echo "After:  $AFTER"
+check "--modify with wrong password leaves the account unchanged" "$BEFORE" "${AFTER:-missing}"
 echo "------------------------------------------"
 echo
 echo

@@ -17,6 +17,8 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.file.AccessDeniedException;
+import java.rmi.AccessException;
 import java.rmi.NotBoundException;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
@@ -49,7 +51,7 @@ public class IdServer implements ServerInterface {
     Object lock = new Object();
     Object electionLock = new Object(); // guards state/coordinator transitions
     // random "pid" used by the bully algorithm, assigned on startup (see whitepaper)
-    private final int serverNum = new Random().nextInt(10000) + 3;
+    private volatile int serverNum = new Random().nextInt(10000) + 3;
     private volatile int state;
     private volatile int coordinatorPid; // pid of the current coordinator, 0 if unknown
     private int electionTicks = 0; // heartbeats spent in the election state
@@ -60,6 +62,7 @@ public class IdServer implements ServerInterface {
     private static ArrayList<String> serverHosts = new ArrayList<String>();
 
     private int heartrate = 2000;
+    private static final int MAX_PEER_FAILURES = 5; // runtime failures before a peer link is abandoned
     private int serverPort = 5126;
 
     private ServerSocket servSock;
@@ -237,7 +240,7 @@ public class IdServer implements ServerInterface {
                 jedis.replicaofNoOne();
             }
             pendingWrites.clear();
-            System.out.println(COORDINATORFLAG + " COORDINATOR SERVER CHOSEN server = " + serverNum);
+            System.out.println(COORDINATORFLAG + " COORDINATOR SERVER CHOSEN. Server = " + myHostName + " with PID = " + serverNum);
             if (verbosity)
                 System.out.println(COORDINATORFLAG + " Coordinator redis is now independent and source of truth");
         }
@@ -292,6 +295,36 @@ public class IdServer implements ServerInterface {
             } else if (state == replica && coordinatorAddr == null) {
                 startElection();
             }
+        }
+    }
+
+    /**
+     * Handles a peer heartbeat carrying this server's own pid. Pids must be unique,
+     * so the coordinator keeps its pid and any other server draws a new one. No
+     * election is forced: a replica keeps following the current coordinator and a
+     * server mid-election carries on with its new pid.
+     * 
+     * The one exception is two coordinators with the same pid (e.g. after a network
+     * split heals). Neither can defer to the other, and following each other would
+     * leave the cluster with no coordinator, so both re-roll and run a new election.
+     * 
+     * @return true if the heartbeat came from a coordinator sharing this coordinator's
+     *         pid and must not be acted on
+     */
+    private boolean handlePidCollision(int peerNum, int peerState) {
+        synchronized (electionLock) {
+            if (peerNum != serverNum)
+                return false;
+            boolean bothCoordinators = state == coordinator && peerState == coordinator;
+            if (state == coordinator && !bothCoordinators)
+                return false;
+            int oldNum = serverNum;
+            while (serverNum == oldNum)
+                serverNum = new Random().nextInt(10000) + 3;
+            System.out.println(ELECTIONFLAG + " Pid " + oldNum + " already in use, re-rolled to " + serverNum);
+            if (bothCoordinators)
+                startElection();
+            return bothCoordinators;
         }
     }
 
@@ -720,7 +753,7 @@ public class IdServer implements ServerInterface {
      * @param ipAddress
      * @return String for client debugging
      */
-    public String createAccount(String username, String realname, byte[] password, String ipAddress) {
+    public synchronized String createAccount(String username, String realname, byte[] password, String ipAddress) {
         if (verbosity) {
             System.out.println(rmiFlag() + " Request to create account \"" + username + "\"");
         }
@@ -795,7 +828,14 @@ public class IdServer implements ServerInterface {
         }
 
         // parse to validate the format and normalize case to match the stored key
-        UUID temp = UUID.fromString(uuid);
+        UUID temp;
+        try {
+            temp = UUID.fromString(uuid);
+        } catch (IllegalArgumentException e) {
+            if (verbosity)
+                System.out.println(rmiFlag() + ERRORC + " Invalid UUID: " + uuid + RESET);
+            return ERRORFLAG + ERRORC + " invalid UUID: " + uuid + RESET;
+        }
         IdAccount acc = readAccount(temp);
 
         if (acc != null) {
@@ -821,7 +861,7 @@ public class IdServer implements ServerInterface {
      * @param recentIp
      * @returns String for client debugging
      */
-    public String changeUsername(String oldName, String newName, byte[] password, String recentIp) {
+    public synchronized String changeUsername(String oldName, String newName, byte[] password, String recentIp) {
         if (verbosity) {
             System.out.println(rmiFlag() + " Request to rename account \"" + oldName + "\" to \"" + newName + "\"");
         }
@@ -869,8 +909,6 @@ public class IdServer implements ServerInterface {
                 }
                 return ACCOUNTC + "Account " + oldName + " found and login name updated to " + newName;
             } else {
-                acc.setDateModified(java.time.LocalDateTime.now());
-                writeAccount(acc);
                 if (verbosity)
                     System.out.println(rmiFlag() + ERRORC + " Password hash does not match" + RESET);
                 return ERRORFLAG + ERRORC + " PASSWORD DENIED" + RESET;
@@ -886,7 +924,7 @@ public class IdServer implements ServerInterface {
      * @param password
      * @return String for client debugging
      */
-    public String deleteAccount(String username, byte[] password) {
+    public synchronized String deleteAccount(String username, byte[] password) {
         if (verbosity) {
             System.out.println(rmiFlag() + " Request to delete account \"" + username + "\"");
         }
@@ -948,7 +986,7 @@ public class IdServer implements ServerInterface {
                     out += ++i + ":   " + acc.toString() + "\n\n";
                 break;
             default:
-                out += ERRORFLAG + ERRORC + " INVALID ARG WITH -get: " + attribute + RESET;
+                out = ERRORFLAG + ERRORC + " INVALID ARG WITH -get: " + attribute + RESET;
                 break;
         }
 
@@ -987,12 +1025,9 @@ public class IdServer implements ServerInterface {
             try {
                 Registry rg = LocateRegistry.getRegistry(port);
                 rg.unbind(RMI_NAME);
-            } catch (RemoteException e) {
+            } catch (RemoteException | NotBoundException e) {
                 System.out.println(
-                        ERRORFLAG + " Error in deathToRMI(). Rmi failed to unbind due to RemoteException");
-            } catch (NotBoundException e) {
-                System.out.println(
-                        ERRORFLAG + " Error in deathToRMI(). Rmi failed to unbind due to NotBoundException");
+                        ERRORFLAG + " Error in deathToRMI(). Rmi failed to unbind due to " + getErrorName(e));
             }
         }
     }
@@ -1010,6 +1045,7 @@ public class IdServer implements ServerInterface {
         private int conNum; // the fake PID for the servers
         private ServerSend toServer; // output stream thread
         private boolean everConnected = false; // false until the first connection to this peer
+        private int failures = 0; // consecutive runtime failures on this peer link
 
         /**
          * CONSTRUCTOR
@@ -1093,12 +1129,15 @@ public class IdServer implements ServerInterface {
                         int[] read = ((int[]) in.readObject());
                         int readState = read[0];
                         conNum = read[1];
+                        if (handlePidCollision(conNum, readState))
+                            continue;
 
                         // part of the bully algorithm
                         if (readState == coordinator)
                             followCoordinator(conNum, connectionHost);
                         else if (readState == election)
                             handleElection(conNum);
+                        failures = 0; // heartbeat handled, the link is healthy
                     }
 
                 } catch (IOException e) {
@@ -1107,6 +1146,17 @@ public class IdServer implements ServerInterface {
                         System.out.println(roleFlag() + ERRORFLAG + " " + lost + conNum + " at " + connectionHost
                                 + " disconnected");
                         handleDisconnect(conNum);
+                    }
+                } catch (RuntimeException e) {
+                    // e.g. redis refusing replicaof; reconnect like a dropped link, but stop
+                    // after repeated failures instead of retrying forever
+                    System.out.println(roleFlag() + ERRORFLAG + " Connection to " + connectionHost + " failed: " + e);
+                    if (conNum != 0)
+                        handleDisconnect(conNum);
+                    if (++failures >= MAX_PEER_FAILURES) {
+                        System.out.println(roleFlag() + ERRORFLAG + ERRORC + " Giving up on peer " + peerHost + " after "
+                                + failures + " consecutive failures" + RESET);
+                        return;
                     }
                 } catch (ClassNotFoundException e) {
                     System.out.println(roleFlag() + ERRORFLAG + ERRORC + " Object read was not an array of integers" + RESET);
@@ -1161,27 +1211,56 @@ public class IdServer implements ServerInterface {
 
     /**
      * Exports this server over RMI with SSL and binds it in the RMI registry so
-     * clients can look it up
+     * clients can look it up. The registry may still be starting, so the bind is
+     * retried a few times.
+     * 
+     * @return true if the server was bound
      */
-    public void bind() {
+    public boolean bind() {
+        ServerInterface stub;
         try {
             RMIClientSocketFactory rmiClientSocketFactory = new SslRMIClientSocketFactory();
             RMIServerSocketFactory rmiServerSocketFactory = new SslRMIServerSocketFactory();
-            ServerInterface stub = (ServerInterface) UnicastRemoteObject.exportObject(this, 0,
+            stub = (ServerInterface) UnicastRemoteObject.exportObject(this, 0,
                     rmiClientSocketFactory, rmiServerSocketFactory);
-
-            Registry reg = LocateRegistry.getRegistry(port);
-            if (verbosity) {
-                System.out.println(SYSTEMFLAG + " Found RMI registry on port " + port);
-            }
-
-            reg.rebind(RMI_NAME, stub);
-            if (verbosity) {
-                System.out.println(SYSTEMFLAG + " Bound \"" + RMI_NAME + "\" in RMI registry");
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
+        } catch (RemoteException e) {
+            System.out.println(SYSTEMFLAG + ERRORFLAG + " Failed to export server: " + e);
+            return false;
         }
+
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            try {
+                Registry reg = LocateRegistry.getRegistry(port);
+                if (verbosity) {
+                    System.out.println(SYSTEMFLAG + " Found RMI registry on port " + port);
+                }
+
+                reg.rebind(RMI_NAME, stub);
+                if (verbosity) {
+                    System.out.println(SYSTEMFLAG + " Bound \"" + RMI_NAME + "\" in RMI registry");
+                }
+                return true;
+            } catch (RemoteException e) {
+                System.out.println(SYSTEMFLAG + ERRORFLAG + " Bind attempt " + attempt + " of 5 failed: " + e);
+                try {
+                    Thread.sleep(2000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Helper method to extract and return the type of error that occured as a string.
+     * @param e
+     * @return Returns the simple name of the error
+     */
+    public static String getErrorName(Exception e) {
+        String errorType = e.getClass().getSimpleName();
+        return errorType;
     }
 
     //////////
@@ -1204,7 +1283,10 @@ public class IdServer implements ServerInterface {
             System.setProperty("javax.net.ssl.keyStorePassword", "123456");
 
             IdServer server = new IdServer(serverFile);
-            server.bind();
+            if (!server.bind()) {
+                System.out.println(SYSTEMFLAG + ERRORFLAG + " Could not bind to the RMI registry, shutting down");
+                System.exit(1);
+            }
 
         } catch (RemoteException e) {
             e.printStackTrace();
