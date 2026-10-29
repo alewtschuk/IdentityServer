@@ -1,6 +1,8 @@
 # Identity Server
 
-* Author: Alex Lewtschuk and Kai Sorrenson
+* Author(s): Alex Lewtschuk and Kai Sorensen
+
+---
 
 ## Overview
 
@@ -10,9 +12,9 @@ The `IdServer` program is the server side implementation of the protocol. It set
 
 The `IdClient` program is the client side implementation that connects to an available server and allows the user to interface with the protocol via the command line.
 
-- IdServer: implements an RMI server
-- IdClient: implements a client that will call remote methods on the server
-- IdAccount: has the utility methods and stores the information for the account objects
+This demo implements a multi-server (three) environment where, upon cluster start-up, server instances elect a coordinator using a bully algorithm that dictates seniority based on a randomly assigned "PID" an individual server generates at each start up. An election is triggered under two circumstances:
+1. The previously mentioned startup.
+2. The current coordinator goes down and a new coordinator is needed.
 
 If another server or servers join the cluster later on the newly connected server will automatically subordinate itself to the existing coordinator, even if the new server's PID is higher than the current coordinator. This method of peer connection allows the system to dynamically scale the number of servers while avoiding unnecessary coordinator selection and election overhead and under conditions where the cluster coordinator is fully functional.
 
