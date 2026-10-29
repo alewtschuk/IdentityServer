@@ -1,5 +1,7 @@
 x-id-server: &id-server
   image: identityserver
+  # the client service builds this image; never try to pull it from Docker Hub
+  pull_policy: never
   # each server runs its own redis and RMI registry inside its container (run-server.sh)
   command: ["./run-server.sh", "5128"]
   networks:
