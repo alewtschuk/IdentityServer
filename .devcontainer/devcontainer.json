@@ -1,0 +1,15 @@
+{
+  // GitHub Codespaces setup: a cloud terminal with Docker so the demo runs with the
+  // same make commands as locally (make up, make test, make failover)
+  "name": "IdentityServer demo",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "hostRequirements": {
+    "cpus": 2,
+    "memory": "8gb"
+  },
+  "postCreateCommand": "command -v make >/dev/null || (sudo apt-get update && sudo apt-get install -y make)",
+  "postAttachCommand": "echo 'IdentityServer demo: run make up, then make test or make failover (see README.md)'"
+}

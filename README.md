@@ -28,6 +28,12 @@ The original 2024 design document for the election and replication model is in [
 
 The demo is designed to run as a multi-server cluster using Docker and Docker Compose. This is the recommended way to run the project as it encapsulates the entire environment (Java, Redis, and networking).
 
+### Run it in your browser
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/alewtschuk/IdentityServer?quickstart=1)
+
+No install needed: GitHub Codespaces opens a cloud terminal with Docker already set up (requires a GitHub account and uses its free Codespaces hours). Once it has started, run the same commands as below, starting with `make up`. The first start takes a few minutes while the environment and image build.
+
 ### 1. Run the Server Cluster
 
 **Requirements:**
